@@ -5,9 +5,9 @@
 #include <cstdio>
 #include <vector>
 
-#include "common.h"
-#include "cpu_gemm.h"
-#include "cuda_gemm.cuh"
+#include "../include/common.h"
+#include "../include/cpu_gemm.h"
+#include "../include/cuda_gemm.cuh"
 
 int main() {
     auto shapes = default_shapes();

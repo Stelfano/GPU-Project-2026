@@ -1,5 +1,5 @@
 // cpu_gemm.cpp
-#include "cpu_gemm.h"
+#include "../include/cpu_gemm.h"
 #include <chrono>
 
 void gemm_cpu(const float* A, const float* B, float* C, int M, int N, int K) {

@@ -5,8 +5,8 @@
 #include <cstdio>
 #include <vector>
 
-#include "common.h"
-#include "cpu_gemm.h"
+#include "../include/common.h"
+#include "../include/cpu_gemm.h"
 
 int main() {
     // Test 1: caso 2x2 calcolato a mano.

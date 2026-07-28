@@ -1,5 +1,5 @@
 // cuda_gemm.cu
-#include "cuda_gemm.cuh"
+#include "../include/cuda_gemm.cuh"
 #include <cstdio>
 #include <cstdlib>
 
