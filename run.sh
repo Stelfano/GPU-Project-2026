@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --partition=edu-short
 #SBATCH --tasks=1
-#SBATCH --gres=gpu:0
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=1
 #SBATCH --nodes=1
 
@@ -10,5 +10,5 @@
 
 module load CUDA
 
-./bin/test_cpu_only
+./bin/main
 
