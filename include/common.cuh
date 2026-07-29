@@ -9,6 +9,7 @@
 #include <random>
 #include <string>
 #include <vector>
+#include <cuda_bf16.h>
 
 // Genera una matrice rows x cols in row-major, valori uniformi in [-scale, scale].
 // Il seed è esplicito così A e B (o due run diversi) sono riproducibili.
@@ -18,6 +19,14 @@ inline void generate_matrix(std::vector<float>& mat, int rows, int cols,
     std::mt19937 gen(seed);
     std::uniform_real_distribution<float> dist(-scale, scale);
     for (auto& v : mat) v = dist(gen);
+}
+
+inline void generate_matrix_bf16(std::vector<__nv_bfloat16>& mat, int rows, int cols,
+                            unsigned seed, __nv_bfloat16 scale=1.0f) {
+    mat.resize(static_cast<size_t>(rows) * static_cast<size_t>(cols));
+    std::mt19937 gen(seed);
+    std::uniform_real_distribution<float> dist(-scale, scale);
+    for(auto& v : mat) v = static_cast<__nv_bfloat16>(dist(gen));
 }
 
 // Confronta due matrici (stessa dimensione n, stesso layout) e calcola

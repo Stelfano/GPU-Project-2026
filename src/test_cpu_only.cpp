@@ -5,19 +5,11 @@
 #include <cstdio>
 #include <vector>
 
-#include "../include/common.h"
+#include "../include/common.cuh"
 #include "../include/cpu_gemm.h"
 
 int main() {
-    // Test 1: caso 2x2 calcolato a mano.
-    std::vector<float> A = {1, 2, 3, 4};  // 2x2
-    std::vector<float> B = {5, 6, 7, 8};  // 2x2
-    std::vector<float> C(4);
-    gemm_cpu(A.data(), B.data(), C.data(), 2, 2, 2);
-    printf("Test 2x2: C = [%.1f, %.1f, %.1f, %.1f] (atteso 19, 22, 43, 50)\n",
-           C[0], C[1], C[2], C[3]);
-
-    // Test 2: generate_matrix + compare_matrices, matrice contro se stessa.
+    // Test 1: generate_matrix + compare_matrices, matrice contro se stessa.
     std::vector<float> M1;
     generate_matrix(M1, 64, 64, 42, 2.0f);
     double max_abs_err, mean_rel_err;
@@ -25,7 +17,7 @@ int main() {
     printf("Test self-compare: max_abs_err=%.6f mean_rel_err=%.6f (attesi entrambi 0)\n",
            max_abs_err, mean_rel_err);
 
-    // Test 3: timing della GEMM naive su una shape piccola.
+    // Test 2: timing della GEMM naive su una shape piccola.
     std::vector<float> A2, B2, C2;
     generate_matrix(A2, 256, 256, 1, 1.0f);
     generate_matrix(B2, 256, 256, 2, 1.0f);
