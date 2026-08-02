@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <vector>
 #include <typeinfo>
+#include "cublas.h"
 
 #include "../include/common.cuh"
 #include "../include/cpu_gemm.h"
@@ -13,24 +14,24 @@
 int main() {
     auto shapes = default_shapes();
 
-    printf("%-38s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
 
     for (const auto& s : shapes) {
         std::vector<float> A, B;
-        generate_matrix(A, s.M, s.K, /*seed=*/1234, 1.0f);
-        generate_matrix(B, s.K, s.N, /*seed=*/5678, 1.0f);
+        generate_matrix<float>(A, s.M, s.K, s.Bsize,/*seed=*/1234, 1.0f);
+        generate_matrix<float>(B, s.K, s.N, s.Bsize,/*seed=*/5678, 1.0f);
 
-        std::vector<float> C_gpu(static_cast<size_t>(s.M) * s.N);
-        double gpu_ms = gemm_cuda_timed(A.data(), B.data(), C_gpu.data(), s.M, s.N, s.K, /*n_reps=*/10);
-        double gpu_gflops = gflops(s.M, s.N, s.K, gpu_ms);
+        std::vector<float> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
+        double gpu_ms = gemm_cuda_timed<float>(A.data(), B.data(), C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
+        double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
 
         char cpu_ms_str[32];
         char rel_err_str[32];
 
         if (s.verify_cpu) {
-            std::vector<float> C_cpu(static_cast<size_t>(s.M) * s.N);
+            std::vector<float> C_cpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
             double cpu_ms = gemm_cpu_timed(A.data(), B.data(), C_cpu.data(), s.M, s.N, s.K);
             double max_abs_err, mean_rel_err;
             compare_matrices(C_cpu.data(), C_gpu.data(), C_cpu.size(), max_abs_err, mean_rel_err);
@@ -41,40 +42,113 @@ int main() {
             snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
         }
 
-        printf("%-38s %6d %6d %6d %12s %12.3f %14.4f %12s\n",
-               s.label.c_str(), s.M, s.N, s.K,
+        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+               s.label.c_str(), s.M, s.N, s.K, s.Bsize,
                cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
     }
 
 
     
     printf("------------------BFLOAT 16-----------------\n");
-    printf("%-38s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
 
     for (const auto& s : shapes) {
         std::vector<__nv_bfloat16> A, B;
-        generate_matrix_bf16(A, s.M, s.K, /*seed=*/1234, 1.0f);
-        generate_matrix_bf16(B, s.K, s.N, /*seed=*/5678, 1.0f);
+        generate_matrix<__nv_bfloat16>(A, s.M, s.K, s.Bsize, /*seed=*/1234, 1.0f);
+        generate_matrix<__nv_bfloat16>(B, s.K, s.N, s.Bsize,/*seed=*/5678, 1.0f);
 
-        std::vector<__nv_bfloat16> C_gpu(static_cast<size_t>(s.M) * s.N);
+        std::vector<__nv_bfloat16> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
 
 
-        double gpu_ms = gemm_cuda_timed_bf16(A.data(),
+        double gpu_ms = gemm_cuda_timed<__nv_bfloat16>(A.data(),
                                              B.data(),
-                                             C_gpu.data(), s.M, s.N, s.K, /*n_reps=*/10);
-        double gpu_gflops = gflops(s.M, s.N, s.K, gpu_ms);
+                                             C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
+        double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
 
         char cpu_ms_str[32];
         char rel_err_str[32];
         snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
         snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
 
-        printf("%-38s %6d %6d %6d %12s %12.3f %14.4f %12s\n",
-               s.label.c_str(), s.M, s.N, s.K,
+        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+               s.label.c_str(), s.M, s.N, s.K, s.Bsize,
                cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
     }
+
+
+        printf("------------------Float 16-----------------\n");
+    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("--------------------------------------------------------------------------------------------------------\n");
+
+    for (const auto& s : shapes) {
+        std::vector<__half> A, B;
+        generate_matrix<__half>(A, s.M, s.K, s.Bsize, /*seed=*/1234, 1.0f);
+        generate_matrix<__half>(B, s.K, s.N, s.Bsize,/*seed=*/5678, 1.0f);
+
+        std::vector<__half> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
+
+
+        double gpu_ms = gemm_cuda_timed<__half>(A.data(),
+                                             B.data(),
+                                             C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
+        double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
+
+        char cpu_ms_str[32];
+        char rel_err_str[32];
+        snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
+        snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
+
+        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+               s.label.c_str(), s.M, s.N, s.K, s.Bsize,
+               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+    }
+    
+      printf("------------------  CuBlas FP16  -----------------\n");
+    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("--------------------------------------------------------------------------------------------------------\n");
+
+    cublasStatus stat;
+
+    for (const auto& s : shapes) {
+        std::vector<__half> A, B;
+        generate_matrix<__half>(A, s.M, s.K, s.Bsize, /*seed=*/1234, 1.0f);
+        generate_matrix<__half>(B, s.K, s.N, s.Bsize,/*seed=*/5678, 1.0f);
+
+        std::vector<__half> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
+
+        size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(__half);
+        size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(__half);
+        size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(__half);
+
+
+        cudaMalloc(&d_A, bytesA);
+        cudaMalloc(&d_B, bytesB);
+        cudaMalloc(&d_C, bytesC);
+
+
+        cublasSetMatrix(M, K, sizeof(__half), &A, 0 , &d_A, 0);
+        cublasSetMatrix(K, N, sizeof(__half), &B, 0 , &d_B, 0);
+
+        double gpu_ms = gemm_cuda_timed<__half>(A.data(),
+                                             B.data(),
+                                             C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
+        double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
+
+        char cpu_ms_str[32];
+        char rel_err_str[32];
+        snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
+        snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
+
+        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+               s.label.c_str(), s.M, s.N, s.K, s.Bsize,
+               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+    }
+   
+
 
     return 0;
 }

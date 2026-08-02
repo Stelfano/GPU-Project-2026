@@ -24,7 +24,7 @@ int main() {
     C2.resize(256 * 256);
     double ms = gemm_cpu_timed(A2.data(), B2.data(), C2.data(), 256, 256, 256);
     printf("Test timing: GEMM 256x256x256 in %.3f ms -> %.3f GFLOP/s\n",
-           ms, gflops(256, 256, 256, ms));
+           ms, gflops(256, 256, 256, 1, ms));
 
     return 0;
 }

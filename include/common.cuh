@@ -11,29 +11,21 @@
 #include <vector>
 #include <cuda_bf16.h>
 
-// Genera una matrice rows x cols in row-major, valori uniformi in [-scale, scale].
-// Il seed è esplicito così A e B (o due run diversi) sono riproducibili.
-inline void generate_matrix(std::vector<float>& mat, int rows, int cols,
-                             unsigned seed, float scale = 1.0f) {
-    mat.resize(static_cast<size_t>(rows) * static_cast<size_t>(cols));
+template <typename T>
+inline void generate_matrix(std::vector<T>& mat, int rows, int cols, int Bsize,
+                            unsigned seed, T scale=1.0f) {
+    mat.resize((static_cast<size_t>(rows) * static_cast<size_t>(cols)) * Bsize);
     std::mt19937 gen(seed);
     std::uniform_real_distribution<float> dist(-scale, scale);
-    for (auto& v : mat) v = dist(gen);
-}
-
-inline void generate_matrix_bf16(std::vector<__nv_bfloat16>& mat, int rows, int cols,
-                            unsigned seed, __nv_bfloat16 scale=1.0f) {
-    mat.resize(static_cast<size_t>(rows) * static_cast<size_t>(cols));
-    std::mt19937 gen(seed);
-    std::uniform_real_distribution<float> dist(-scale, scale);
-    for(auto& v : mat) v = static_cast<__nv_bfloat16>(dist(gen));
+    for(auto& v : mat) v = static_cast<T>(dist(gen));
 }
 
 // Confronta due matrici (stessa dimensione n, stesso layout) e calcola
 // errore assoluto massimo ed errore relativo medio. Serve già ora per
 // validare GPU-naive contro CPU, e servirà tale e quale più avanti per
 // confrontare i kernel a bassa precisione contro il riferimento FP32.
-inline void compare_matrices(const float* ref, const float* test, size_t n,
+template<typename T>
+inline void compare_matrices(const T* ref, const T* test, size_t n,
                               double& max_abs_err, double& mean_rel_err) {
     max_abs_err = 0.0;
     double sum_rel_err = 0.0;
@@ -53,23 +45,24 @@ inline void compare_matrices(const float* ref, const float* test, size_t n,
 // validate più avanti a campione, o contro cuBLAS invece che contro
 // questo riferimento scalare.
 struct GemmShape {
-    int M, N, K;
+    int M, N, K, Bsize;
     bool verify_cpu;
     std::string label;
 };
 
 inline std::vector<GemmShape> default_shapes() {
     return {
-        {256,  256,  256,  true,  "square-small"},
-        {1024, 1024, 1024, true,  "square-medium"},
-        {4096, 4096, 4096, false, "square-large"},
-        {4096, 1024, 1024, true,  "tall-skinny (batch*seq x hidden)"},
-        {4096, 4096, 1024, false, "FFN up-projection (hidden -> 4*hidden)"},
-        {4096, 1024, 4096, false, "FFN down-projection (4*hidden -> hidden)"},
+        {256,  256,  256, 1,  false,  "square-small"},
+        {1024, 1024, 1024, 1, false,  "square-medium"},
+        {4096, 4096, 4096, 1, false, "square-large"},
+        {4096, 1024, 1024, 1, false,  "tall-skinny (batch*seq x hidden)"},
+        {4096, 4096, 1024, 1, false, "FFN up-projection (hidden -> 4*hidden)"},
+        {4096, 1024, 4096, 1, false, "FFN down-projection (4*hidden -> hidden)"},
+        {256,  256,  256, 2,  false,  "square-small-B2"},
     };
 }
 
-inline double gflops(long long M, long long N, long long K, double ms) {
-    double flop = 2.0 * static_cast<double>(M) * static_cast<double>(N) * static_cast<double>(K);
+inline double gflops(long long M, long long N, long long K, long long Bsize, double ms) {
+    double flop = 2.0 * static_cast<double>(M) * static_cast<double>(N) * static_cast<double>(K) * static_cast<double>(Bsize);
     return flop / (ms / 1000.0) / 1e9;
 }
