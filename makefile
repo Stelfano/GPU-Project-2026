@@ -2,7 +2,7 @@ CC=nvcc
 
 ARCH=sm_80
 
-LIB_FLAGS=-lm -O3 -arch=$(ARCH)
+LIB_FLAGS=-lm -O3 -arch=$(ARCH) -lcublas 
 
 BIN_FOLDER := bin
 OBJ_FOLDER := obj
