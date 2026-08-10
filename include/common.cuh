@@ -52,13 +52,21 @@ struct GemmShape {
 
 inline std::vector<GemmShape> default_shapes() {
     return {
-        {256,  256,  256, 1,  false,  "square-small"},
+        {256,  256,  256, 1,  true,  "square-small"},
         {1024, 1024, 1024, 1, false,  "square-medium"},
         {4096, 4096, 4096, 1, false, "square-large"},
-        {4096, 1024, 1024, 1, false,  "tall-skinny (batch*seq x hidden)"},
+        {4096, 1024, 1024, 1, true,  "tall-skinny (batch*seq x hidden)"},
         {4096, 4096, 1024, 1, false, "FFN up-projection (hidden -> 4*hidden)"},
         {4096, 1024, 4096, 1, false, "FFN down-projection (4*hidden -> hidden)"},
         {256,  256,  256, 2,  false,  "square-small-B2"},
+    };
+}
+
+inline std::vector<GemmShape> reduced_shapes(){
+    return{
+        {256,  256,  256, 1,  false,  "square-small"},
+        {1024, 256, 1024, 1,  false, "FFN down-projection (4*hidden -> hidden)"},
+
     };
 }
 
