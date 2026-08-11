@@ -11,6 +11,8 @@
 #include <vector>
 #include <cuda_bf16.h>
 
+#define ReLU(x) max(0, x) 
+
 template <typename T>
 inline void generate_matrix(std::vector<T>& mat, int rows, int cols, int Bsize,
                             unsigned seed, T scale=1.0f) {
@@ -25,7 +27,7 @@ inline void generate_matrix(std::vector<T>& mat, int rows, int cols, int Bsize,
 // validare GPU-naive contro CPU, e servirà tale e quale più avanti per
 // confrontare i kernel a bassa precisione contro il riferimento FP32.
 template<typename T>
-inline void compare_matrices(const T* ref, const T* test, size_t n,
+inline void compare_matrices(const float* ref, const T* test, size_t n,
                               double& max_abs_err, double& mean_rel_err) {
     max_abs_err = 0.0;
     double sum_rel_err = 0.0;
@@ -48,25 +50,25 @@ struct GemmShape {
     int M, N, K, Bsize;
     bool verify_cpu;
     std::string label;
+    float *reference;
 };
 
 inline std::vector<GemmShape> default_shapes() {
     return {
-        {256,  256,  256, 1,  true,  "square-small"},
-        {1024, 1024, 1024, 1, false,  "square-medium"},
-        {4096, 4096, 4096, 1, false, "square-large"},
-        {4096, 1024, 1024, 1, true,  "tall-skinny (batch*seq x hidden)"},
-        {4096, 4096, 1024, 1, false, "FFN up-projection (hidden -> 4*hidden)"},
-        {4096, 1024, 4096, 1, false, "FFN down-projection (4*hidden -> hidden)"},
-        {256,  256,  256, 2,  false,  "square-small-B2"},
+        {256,  256,  256, 1,  true,  "square-small", nullptr},
+        {1024, 1024, 1024, 1, false,  "square-medium", nullptr},
+        {4096, 4096, 4096, 1, false, "square-large", nullptr},
+        {4096, 1024, 1024, 1, true,  "tall-skinny (batch*seq x hidden)", nullptr},
+        {4096, 4096, 1024, 1, false, "FFN up-projection (hidden -> 4*hidden)", nullptr},
+        {4096, 1024, 4096, 1, false, "FFN down-projection (4*hidden -> hidden)", nullptr},
+        {256,  256,  256, 2,  false,  "square-small-B2", nullptr},
     };
 }
 
 inline std::vector<GemmShape> reduced_shapes(){
     return{
-        {256,  256,  256, 1,  false,  "square-small"},
-        {1024, 256, 1024, 1,  false, "FFN down-projection (4*hidden -> hidden)"},
-
+        {256,  256,  256, 1,  true,  "square-small", nullptr},
+        {1024, 256, 1024, 1,  true, "FFN down-projection (4*hidden -> hidden)", nullptr},
     };
 }
 

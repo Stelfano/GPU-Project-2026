@@ -13,6 +13,109 @@
 
 int main() {
     auto shapes = reduced_shapes();
+
+    printf("------------------  CuBlas FP32  -----------------\n");
+    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("--------------------------------------------------------------------------------------------------------\n");
+
+    for (auto& s : shapes) {
+        std::vector<float> A, B;
+        generate_matrix<float>(A, s.M, s.K, s.Bsize, /*seed=*/1234, 1.0f);
+        generate_matrix<float>(B, s.K, s.N, s.Bsize,/*seed=*/5678, 1.0f);
+
+
+        std::vector<float> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
+        std::vector<float> C_cpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
+
+        size_t bytesA = static_cast<size_t>(s.M) * s.K * s.Bsize * sizeof(float);
+        size_t bytesB = static_cast<size_t>(s.K) * s.N * s.Bsize * sizeof(float);
+        size_t bytesC = static_cast<size_t>(s.M) * s.N * s.Bsize * sizeof(float);
+
+        float *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+
+        cudaMalloc(&d_A, bytesA);
+        cudaMalloc(&d_B, bytesB);
+        cudaMalloc(&d_C, bytesC);
+
+        cublasHandle_t handle;
+
+        cublasStatus_t status = cublasCreate(&handle);
+
+        if(status != CUBLAS_STATUS_SUCCESS){
+            fprintf(stderr, "cuBLAS FP32 initialization error\n");
+            return EXIT_FAILURE;
+        }
+
+        cublasSetMatrix(s.M, s.K, sizeof(float), A.data(), s.M, d_A, s.M);
+        cublasSetMatrix(s.K, s.N, sizeof(float), B.data(), s.K, d_B, s.K);
+        cublasSetMatrix(s.M, s.N, sizeof(float), C_gpu.data(), s.M, d_C, s.N);
+        float alpha = 1, beta = 0;
+        cublasStatus_t stat;
+
+        cudaEvent_t start, stop;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+
+        float gpu_ms = 0;
+
+        double max_abs_err;
+        double mean_rel_err;
+
+        char cpu_ms_str[32];
+        char rel_err_str[32];
+            
+        cudaEventRecord(start);
+
+        stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                            s.N, s.M, s.K,
+                            &alpha,
+                            d_B, CUDA_R_32F, s.N, s.M*s.K,
+                            d_A, CUDA_R_32F, s.K, s.N*s.K,
+                            &beta,
+                            d_C, CUDA_R_32F, s.N, s.M*s.N, s.Bsize,
+                            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+
+        if(s.reference == nullptr){
+            cudaMemcpy(C_cpu.data(), d_C, bytesC, cudaMemcpyDeviceToHost);
+            float *ref = new float[s.M*s.N*s.Bsize];
+            s.reference = ref;
+            std::copy(C_cpu.begin(), C_cpu.end(), ref);
+        }
+
+        if(stat != CUBLAS_STATUS_SUCCESS){
+            fprintf(stderr, "cuBLAS FP32 GEMM failure\n");
+            return EXIT_FAILURE;
+        }
+
+        if(s.verify_cpu){
+            compare_matrices(C_cpu.data(), C_gpu.data(), C_cpu.size(), max_abs_err, mean_rel_err);
+            float cpu_ms = 0;
+            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
+            snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
+        }else{
+            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
+            snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
+        }
+            
+        cudaEventElapsedTime(&gpu_ms, start, stop);
+        double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
+
+
+        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+               s.label.c_str(), s.M, s.N, s.K, s.Bsize,
+               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+        cudaFree(d_A);
+        cudaFree(d_B);
+        cudaFree(d_C);
+        cublasDestroy(handle);
+    }
     
 
     printf("------------------FLOAT 32-----------------\n");
@@ -29,11 +132,21 @@ int main() {
         double gpu_ms = gemm_cuda_timed<float>(A.data(), B.data(), C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
 
+        double max_abs_err;
+        double mean_rel_err;
+
         char cpu_ms_str[32];
         char rel_err_str[32];
 
-        snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
-        snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
+        if(s.verify_cpu){
+            compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
+            float cpu_ms = 0;
+            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
+            snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
+        }else{
+            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
+            snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
+        }
 
         printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
@@ -60,10 +173,22 @@ int main() {
                                              C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
 
+        double max_abs_err;
+        double mean_rel_err;
+
         char cpu_ms_str[32];
         char rel_err_str[32];
-        snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
-        snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
+
+        if(s.verify_cpu){
+            compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
+            float cpu_ms = 0;
+            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
+            snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
+        }else{
+            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
+            snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
+        }
+
 
         printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
@@ -89,10 +214,22 @@ int main() {
                                              C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
 
+       
+        double max_abs_err;
+        double mean_rel_err;
+
         char cpu_ms_str[32];
         char rel_err_str[32];
-        snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
-        snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
+
+        if(s.verify_cpu){
+            compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
+            float cpu_ms = 0;
+            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
+            snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
+        }else{
+            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
+            snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
+        }
 
         printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
@@ -108,8 +245,6 @@ int main() {
         std::vector<__half> A, B;
         generate_matrix<__half>(A, s.M, s.K, s.Bsize, /*seed=*/1234, 1.0f);
         generate_matrix<__half>(B, s.K, s.N, s.Bsize,/*seed=*/5678, 1.0f);
-
-        std::vector<__half> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
 
         size_t bytesA = static_cast<size_t>(s.M) * s.K * s.Bsize * sizeof(__half);
         size_t bytesB = static_cast<size_t>(s.K) * s.N * s.Bsize * sizeof(__half);
@@ -131,7 +266,6 @@ int main() {
 
         cublasSetMatrix(s.M, s.K, sizeof(__half), A.data(), s.M, d_A, s.M);
         cublasSetMatrix(s.K, s.N, sizeof(__half), B.data(), s.K, d_B, s.K);
-        cublasSetMatrix(s.M, s.N, sizeof(__half), C_gpu.data(), s.M, d_C, s.N);
         float alpha = 1, beta = 0;
         cublasStatus_t stat;
         cudaEvent_t start, stop;
@@ -163,10 +297,25 @@ stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
 
 
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
+       
+        double max_abs_err;
+        double mean_rel_err;
+
         char cpu_ms_str[32];
         char rel_err_str[32];
-        snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
-        snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
+
+        if(s.verify_cpu){
+            std::vector<__half> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
+            cudaMemcpy(C_gpu.data(), d_C, s.M*s.N*s.Bsize*sizeof(__half), cudaMemcpyDeviceToHost);
+            compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
+            float cpu_ms = 0;
+            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
+            snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
+        }else{
+            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
+            snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
+        }
+
 
         printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
@@ -245,113 +394,24 @@ stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
 
 
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
-        char cpu_ms_str[32];
-        char rel_err_str[32];
-        snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
-        snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
-
-        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
-               s.label.c_str(), s.M, s.N, s.K, s.Bsize,
-               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
-
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
-        cudaFree(d_A);
-        cudaFree(d_B);
-        cudaFree(d_C);
-        cublasDestroy(handle);
-    }
-
-
-    printf("------------------  CuBlas FP32  -----------------\n");
-    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
-    printf("--------------------------------------------------------------------------------------------------------\n");
-
-    for (const auto& s : shapes) {
-        std::vector<float> A, B;
-        generate_matrix<float>(A, s.M, s.K, s.Bsize, /*seed=*/1234, 1.0f);
-        generate_matrix<float>(B, s.K, s.N, s.Bsize,/*seed=*/5678, 1.0f);
-
-
-        std::vector<float> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
-        std::vector<float> C_cpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
-
-        size_t bytesA = static_cast<size_t>(s.M) * s.K * s.Bsize * sizeof(float);
-        size_t bytesB = static_cast<size_t>(s.K) * s.N * s.Bsize * sizeof(float);
-        size_t bytesC = static_cast<size_t>(s.M) * s.N * s.Bsize * sizeof(float);
-
-        float *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
-
-        cudaMalloc(&d_A, bytesA);
-        cudaMalloc(&d_B, bytesB);
-        cudaMalloc(&d_C, bytesC);
-
-        cublasHandle_t handle;
-
-        cublasStatus_t status = cublasCreate(&handle);
-
-        if(status != CUBLAS_STATUS_SUCCESS){
-            fprintf(stderr, "cuBLAS FP32 initialization error\n");
-            return EXIT_FAILURE;
-        }
-
-        cublasSetMatrix(s.M, s.K, sizeof(float), A.data(), s.M, d_A, s.M);
-        cublasSetMatrix(s.K, s.N, sizeof(float), B.data(), s.K, d_B, s.K);
-        cublasSetMatrix(s.M, s.N, sizeof(float), C_gpu.data(), s.M, d_C, s.N);
-        float alpha = 1, beta = 0;
-        cublasStatus_t stat;
-
-        cudaEvent_t start, stop;
-        cudaEventCreate(&start);
-        cudaEventCreate(&stop);
-
-        float gpu_ms = 0;
-
-        double cpu_ms;
+       
         double max_abs_err;
         double mean_rel_err;
 
         char cpu_ms_str[32];
         char rel_err_str[32];
 
-
-            
-        cudaEventRecord(start);
-
-        stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                            s.N, s.M, s.K,
-                            &alpha,
-                            d_B, CUDA_R_32F, s.N, s.M*s.K,
-                            d_A, CUDA_R_32F, s.K, s.N*s.K,
-                            &beta,
-                            d_C, CUDA_R_32F, s.N, s.M*s.N, s.Bsize,
-                            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-
-        cudaEventRecord(stop);
-        cudaEventSynchronize(stop);
-
-        cublasGetMatrix(s.M, s.N, sizeof(float), d_C, s.M, C_gpu.data(), s.M);
-        if(stat != CUBLAS_STATUS_SUCCESS){
-            fprintf(stderr, "cuBLAS FP32 non-batched gemm failure\n");
-            return EXIT_FAILURE;
-        }
-
         if(s.verify_cpu){
-            cpu_ms = gemm_cpu_timed(A.data(), B.data(), C_cpu.data(), s.M, s.N, s.K);
-            compare_matrices(C_cpu.data(), C_gpu.data(), C_cpu.size(), max_abs_err, mean_rel_err);
+            std::vector<__half> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
+            cudaMemcpy(C_gpu.data(), d_C, s.M*s.N*s.Bsize*sizeof(__half), cudaMemcpyDeviceToHost);
+            compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
+            float cpu_ms = 0;
             snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
         }else{
             snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
             snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
         }
-            
-        gpu_ms = 0.0f;
-        cudaEventElapsedTime(&gpu_ms, start, stop);
-
-
-        double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
 
 
         printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
@@ -366,5 +426,9 @@ stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
         cublasDestroy(handle);
     }
 
+
+    for(auto &s : shapes){
+        delete[] s.reference;
+    }
     return 0;
 }

@@ -2,6 +2,7 @@
 #pragma once
 #include <cuda_bf16.h>
 #include <cstdio>
+#include "common.cuh"
 
 #define CUDA_CHECK(call)                                                   \
     do {                                                                   \
@@ -92,4 +93,13 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, T* h_C,
     CUDA_CHECK(cudaFree(d_C));
 
     return ms_avg;
+}
+
+template <typename T>
+__global__ naiveReLU(T *C, size_t size){
+
+    int id = threadIdx.x + blockDim.x * blockIdx.x;
+    
+    if(id < size)
+        C[id] = ReLU(C[id]);
 }
