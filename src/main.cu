@@ -47,9 +47,9 @@ int main() {
             return EXIT_FAILURE;
         }
 
-        cublasSetMatrix(s.M, s.K, sizeof(float), A.data(), s.M, d_A, s.M);
-        cublasSetMatrix(s.K, s.N, sizeof(float), B.data(), s.K, d_B, s.K);
-        cublasSetMatrix(s.M, s.N, sizeof(float), C_gpu.data(), s.M, d_C, s.N);
+        cudaMemcpy(d_A, A.data(), bytesA, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_B, B.data(), bytesB, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_C, C_gpu.data(), bytesC, cudaMemcpyHostToDevice);
         float alpha = 1, beta = 0;
         cublasStatus_t stat;
 
@@ -74,23 +74,16 @@ int main() {
                             d_A, CUDA_R_32F, s.K, s.N*s.K,
                             &beta,
                             d_C, CUDA_R_32F, s.N, s.M*s.N, s.Bsize,
-                            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+                            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);;
 
         cudaEventRecord(stop);
         cudaEventSynchronize(stop);
+        cudaMemcpy(C_cpu.data(), d_C, s.M * s.N * s.Bsize *sizeof(float), cudaMemcpyDeviceToHost);
 
         if(s.reference == nullptr){
             float *ref = new float[bytesC];
             cudaMemcpy(ref, d_C, bytesC, cudaMemcpyDeviceToHost);
             s.reference = ref;
-            if(s.Bsize > 1){
-                    bool batch1_nonzero = false;
-                    for (size_t i = 0; i < static_cast<size_t>(s.M) * s.N; ++i) {
-                        if (s.reference[s.M * s.N + i] != 0.0f) { batch1_nonzero = true; break; }
-                    }
-                    printf("  [check] batch 1 ha valori non nulli: %s (primo elemento = %f)\n",
-                 batch1_nonzero ? "si" : "no", s.reference[s.M * s.N]);
-            }
         }
 
         if(stat != CUBLAS_STATUS_SUCCESS){
@@ -273,8 +266,8 @@ int main() {
             return EXIT_FAILURE;
         }
 
-        cublasSetMatrix(s.M, s.K, sizeof(__half), A.data(), s.M, d_A, s.M);
-        cublasSetMatrix(s.K, s.N, sizeof(__half), B.data(), s.K, d_B, s.K);
+        cudaMemcpy(d_A, A.data(), bytesA, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_B, B.data(), bytesB, cudaMemcpyHostToDevice);
         float alpha = 1, beta = 0;
         cublasStatus_t stat;
         cudaEvent_t start, stop;
@@ -370,9 +363,8 @@ int main() {
             return EXIT_FAILURE;
         }
 
-        cublasSetMatrix(s.M, s.K, sizeof(__nv_bfloat16), A.data(), s.M, d_A, s.M);
-        cublasSetMatrix(s.K, s.N, sizeof(__nv_bfloat16), B.data(), s.K, d_B, s.K);
-        cublasSetMatrix(s.M, s.N, sizeof(__nv_bfloat16), C_gpu.data(), s.M, d_C, s.N);
+        cudaMemcpy(d_A, A.data(), bytesA, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_B, B.data(), bytesB, cudaMemcpyHostToDevice);
         float alpha = 1, beta = 0;
         cublasStatus_t stat;
 
