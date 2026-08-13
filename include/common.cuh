@@ -11,12 +11,12 @@
 #include <vector>
 #include <cuda_bf16.h>
 
-#define ReLU(x) max(0, x) 
+#define ReLU(x) max((float)0, (float)x) 
 
 template <typename T>
 inline void generate_matrix(std::vector<T>& mat, int rows, int cols, int Bsize,
                             unsigned seed, T scale=1.0f) {
-    mat.resize((static_cast<size_t>(rows) * static_cast<size_t>(cols)) * Bsize);
+    mat.resize((static_cast<size_t>(rows) * static_cast<size_t>(cols)) * static_cast<size_t>(Bsize));
     std::mt19937 gen(seed);
     std::uniform_real_distribution<float> dist(-scale, scale);
     for(auto& v : mat) v = static_cast<T>(dist(gen));
@@ -32,13 +32,13 @@ inline void compare_matrices(const float* ref, const T* test, size_t n,
     max_abs_err = 0.0;
     double sum_rel_err = 0.0;
     for (size_t i = 0; i < n; ++i) {
-        double r = static_cast<double>(ref[i]);
-        double t = static_cast<double>(test[i]);
+        double r = static_cast<float>(ref[i]);
+        double t = static_cast<float>(test[i]);
         double diff = std::fabs(r - t);
         max_abs_err = std::max(max_abs_err, diff);
         sum_rel_err += diff / (std::fabs(r) + 1e-8);
     }
-    mean_rel_err = sum_rel_err / static_cast<double>(n);
+    mean_rel_err = sum_rel_err / static_cast<float>(n);
 }
 
 // Una singola configurazione di test: C (MxN) = A (MxK) * B (KxN).
@@ -56,12 +56,12 @@ struct GemmShape {
 inline std::vector<GemmShape> default_shapes() {
     return {
         {256,  256,  256, 1,  true,  "square-small", nullptr},
-        {1024, 1024, 1024, 1, false,  "square-medium", nullptr},
-        {4096, 4096, 4096, 1, false, "square-large", nullptr},
+        {1024, 1024, 1024, 1, true,  "square-medium", nullptr},
+        {4096, 4096, 4096, 1, true, "square-large", nullptr},
         {4096, 1024, 1024, 1, true,  "tall-skinny (batch*seq x hidden)", nullptr},
-        {4096, 4096, 1024, 1, false, "FFN up-projection (hidden -> 4*hidden)", nullptr},
-        {4096, 1024, 4096, 1, false, "FFN down-projection (4*hidden -> hidden)", nullptr},
-        {256,  256,  256, 2,  false,  "square-small-B2", nullptr},
+        {4096, 4096, 1024, 1, true, "FFN up-projection (hidden -> 4*hidden)", nullptr},
+        {4096, 1024, 4096, 1, true, "FFN down-projection (4*hidden -> hidden)", nullptr},
+        {256,  256,  256, 2,  true,  "square-small-B2", nullptr},
     };
 }
 

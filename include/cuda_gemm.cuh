@@ -42,6 +42,20 @@ __global__ void gemm_naive_kernel(const T* __restrict__ A,
     }
 }
 
+
+template <typename T>
+__global__ void naiveReLU(T *C, int M, int N, int Bsize){
+
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int batch = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (row < M && col < N && batch < Bsize) {
+        int pos = static_cast<size_t>(row) * N + col + batch*(M*N);
+        C[pos] = ReLU(C[pos]);
+    }
+}
+
 template <typename T>
 double gemm_cuda_timed(const T* h_A, const T* h_B, T* h_C,
                        int M, int N, int K, int Bsize, int n_reps) {
@@ -76,6 +90,7 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, T* h_C,
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
         gemm_naive_kernel<T><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        //naiveReLU<T><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
@@ -95,11 +110,3 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, T* h_C,
     return ms_avg;
 }
 
-template <typename T>
-__global__ naiveReLU(T *C, size_t size){
-
-    int id = threadIdx.x + blockDim.x * blockIdx.x;
-    
-    if(id < size)
-        C[id] = ReLU(C[id]);
-}

@@ -12,7 +12,7 @@
 #include "../include/cuda_gemm.cuh"
 
 int main() {
-    auto shapes = reduced_shapes();
+    auto shapes = default_shapes();
 
     printf("------------------  CuBlas FP32  -----------------\n");
     printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
@@ -80,10 +80,17 @@ int main() {
         cudaEventSynchronize(stop);
 
         if(s.reference == nullptr){
-            cudaMemcpy(C_cpu.data(), d_C, bytesC, cudaMemcpyDeviceToHost);
-            float *ref = new float[s.M*s.N*s.Bsize];
+            float *ref = new float[bytesC];
+            cudaMemcpy(ref, d_C, bytesC, cudaMemcpyDeviceToHost);
             s.reference = ref;
-            std::copy(C_cpu.begin(), C_cpu.end(), ref);
+            if(s.Bsize > 1){
+                    bool batch1_nonzero = false;
+                    for (size_t i = 0; i < static_cast<size_t>(s.M) * s.N; ++i) {
+                        if (s.reference[s.M * s.N + i] != 0.0f) { batch1_nonzero = true; break; }
+                    }
+                    printf("  [check] batch 1 ha valori non nulli: %s (primo elemento = %f)\n",
+                 batch1_nonzero ? "si" : "no", s.reference[s.M * s.N]);
+            }
         }
 
         if(stat != CUBLAS_STATUS_SUCCESS){
@@ -92,7 +99,8 @@ int main() {
         }
 
         if(s.verify_cpu){
-            compare_matrices(C_cpu.data(), C_gpu.data(), C_cpu.size(), max_abs_err, mean_rel_err);
+            cudaMemcpy(C_gpu.data(), d_C, s.M*s.N*s.Bsize*sizeof(float), cudaMemcpyDeviceToHost);
+            compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
             float cpu_ms = 0;
             snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
@@ -140,6 +148,7 @@ int main() {
 
         if(s.verify_cpu){
             compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
+            
             float cpu_ms = 0;
             snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
@@ -277,7 +286,7 @@ int main() {
 
         cudaEventRecord(start);
 
-stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+        stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
                             s.N, s.M, s.K,
                             &alpha,
                             d_B, CUDA_R_16F, s.N, s.M*s.K,
@@ -305,8 +314,8 @@ stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
         char rel_err_str[32];
 
         if(s.verify_cpu){
-            std::vector<__half> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
-            cudaMemcpy(C_gpu.data(), d_C, s.M*s.N*s.Bsize*sizeof(__half), cudaMemcpyDeviceToHost);
+            std::vector<__half> C_gpu(bytesC);
+            cudaMemcpy(C_gpu.data(), d_C, bytesC, cudaMemcpyDeviceToHost);
             compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
             float cpu_ms = 0;
             snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
@@ -339,7 +348,7 @@ stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
         generate_matrix<__nv_bfloat16>(A, s.M, s.K, s.Bsize, /*seed=*/1234, 1.0f);
         generate_matrix<__nv_bfloat16>(B, s.K, s.N, s.Bsize,/*seed=*/5678, 1.0f);
 
-        std::vector<__half> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
+        std::vector<__nv_bfloat16> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
 
         size_t bytesA = static_cast<size_t>(s.M) * s.K * s.Bsize * sizeof(__nv_bfloat16);
         size_t bytesB = static_cast<size_t>(s.K) * s.N * s.Bsize * sizeof(__nv_bfloat16);
@@ -402,8 +411,8 @@ stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
         char rel_err_str[32];
 
         if(s.verify_cpu){
-            std::vector<__half> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
-            cudaMemcpy(C_gpu.data(), d_C, s.M*s.N*s.Bsize*sizeof(__half), cudaMemcpyDeviceToHost);
+            std::vector<__half> C_gpu(bytesC);
+            cudaMemcpy(C_gpu.data(), d_C, bytesC, cudaMemcpyDeviceToHost);
             compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
             float cpu_ms = 0;
             snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
