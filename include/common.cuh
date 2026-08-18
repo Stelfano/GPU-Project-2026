@@ -11,8 +11,6 @@
 #include <vector>
 #include <cuda_bf16.h>
 
-#define ReLU(x) max((float)0, (float)x) 
-
 template <typename T>
 inline void generate_matrix(std::vector<T>& mat, int rows, int cols, int Bsize,
                             unsigned seed, T scale=1.0f) {
