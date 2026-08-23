@@ -5,6 +5,8 @@
 #include "common.cuh"
 #include <mma.h>
 
+using namespace nvcuda;
+
 #define CUDA_CHECK(call)                                                   \
     do {                                                                   \
         cudaError_t err__ = (call);                                        \
@@ -15,6 +17,7 @@
         }                                                                  \
     } while (0)
 
+#define WARP_SIZE 32
 
 // Esegue C = A * B su GPU con un kernel naive (un thread per elemento di C,
 // nessuna shared memory, nessun register blocking — è deliberatamente il
@@ -343,6 +346,126 @@ double gemm_tiled_timed_2D(const T* h_A, const T* h_B, T* h_C,
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
         gemm_tiled_kernel<T, BM, BN, BK, TM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    }
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms_total = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
+    double ms_avg = static_cast<double>(ms_total) / n_reps;
+
+    CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_A));
+    CUDA_CHECK(cudaFree(d_B));
+    CUDA_CHECK(cudaFree(d_C));
+
+    return ms_avg;
+}
+
+
+template <typename T, typename Acc>
+__global__ void mma_kernel(T *a, T *b, Acc *c, int M, int N, int K, int Bsize) {
+   // The only dimensions currently supported by WMMA
+    const int WMMA_M = 16;
+    const int WMMA_N = 16;
+    const int WMMA_K = 16;
+ 
+    // Leading dimensions. Packed with no transpositions.
+    int lda = K;
+    int ldb = N;
+    int ldc = N;
+     
+    // Tile using a 2D grid
+    int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+    int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
+
+    wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> b_frag;
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, Acc> acc_frag;
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, Acc> c_frag;
+    wmma::fill_fragment(acc_frag, 0.0f);
+
+        // Loop over the K-dimension
+    for (int i = 0; i < K; i += WMMA_K) {
+        int aRow = warpM * WMMA_M;
+        int aCol = i;
+        int bRow = i;
+        int bCol = warpN * WMMA_N;
+        
+        // Bounds checking
+        if (aRow < M && aCol < K && bRow < K && bCol < N) {
+            // Load the inputs
+            wmma::load_matrix_sync(a_frag, a + aRow + aCol * lda, lda);
+            wmma::load_matrix_sync(b_frag, b + bRow + bCol * ldb, ldb);
+    
+            // Perform the matrix multiplication
+            wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+        }
+    }
+
+        // Load in current value of c, scale by beta, and add to result scaled by alpha
+    int cRow = warpM * WMMA_M;
+    int cCol = warpN * WMMA_N;
+    
+    if (cRow < M && cCol < N) {
+        wmma::load_matrix_sync(c_frag, c + cRow + cCol * ldc, ldc, wmma::mem_row_major);
+        
+        for(int i=0; i < c_frag.num_elements; i++) {
+            c_frag.x[i] = acc_frag.x[i] + c_frag.x[i];
+        }
+
+            // Store the output
+        wmma::store_matrix_sync(c + cRow + cCol * ldc, c_frag, ldc, wmma::mem_row_major);
+    }
+}
+
+
+
+template <typename T, typename Acc>
+double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
+                       int M, int N, int K, int Bsize, int n_reps) {
+    
+    // Dimensione automatica basata sul tipo T passata alla funzione
+    size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
+    size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
+    size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(Acc);
+
+    T *d_A = nullptr, *d_B = nullptr;
+    Acc *d_C = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_A, bytesA));
+    CUDA_CHECK(cudaMalloc(&d_B, bytesB));
+    CUDA_CHECK(cudaMalloc(&d_C, bytesC));
+
+    CUDA_CHECK(cudaMemcpy(d_A, h_A, bytesA, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_B, h_B, bytesB, cudaMemcpyHostToDevice));
+
+    int BLKSIZE = 16;
+    if(M != N || M != K || N != K){
+        return -1;
+    }
+
+    dim3 blockDim(128, 4);
+    dim3 gridDim;
+    gridDim.x = (M + (BLKSIZE * blockDim.x / 32 - 1)) / (BLKSIZE * blockDim.x / 32);
+    gridDim.y = 1;
+    gridDim.z = 1;
+
+    // Warm-up: specifichiamo <T> al kernel
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int r = 0; r < n_reps; ++r) {
+        if(M == N && M == K && N == K){
+            mma_kernel<T, float><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        }
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
