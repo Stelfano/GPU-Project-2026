@@ -95,7 +95,7 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, T* h_C,
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
         gemm_naive_kernel<T><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
-        naiveReLU<T><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+        //naiveReLU<T><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
@@ -413,6 +413,7 @@ __global__ void mma_kernel(T *a, T *b, Acc *c, int M, int N, int K, int Bsize) {
     if (cRow < M && cCol < N) {
         wmma::load_matrix_sync(c_frag, c + cRow + cCol * ldc, ldc, wmma::mem_row_major);
         
+        //Add ReLU here
         for(int i=0; i < c_frag.num_elements; i++) {
             c_frag.x[i] = acc_frag.x[i] + c_frag.x[i];
         }
@@ -422,6 +423,54 @@ __global__ void mma_kernel(T *a, T *b, Acc *c, int M, int N, int K, int Bsize) {
     }
 }
 
+
+template <typename T, typename Acc>
+__global__ void batched_mma_kernel(T *a, T *b, Acc *c, int M, int N, int K, int Bsize) {
+    const int WMMA_M = 16;
+    const int WMMA_N = 16;
+    const int WMMA_K = 16;
+ 
+    int lda = K;
+    int ldb = N;
+    int ldc = N;
+
+    int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+    int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
+
+    wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> b_frag;
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, Acc> acc_frag;
+
+        // Loop over the K-dimension
+    for(int batch = 0; batch < Bsize; batch++){
+        wmma::fill_fragment(acc_frag, 0.0f);
+        int cBatch = batch * M * N;
+        int cRow = warpM * WMMA_M;
+        int cCol = warpN * WMMA_N;
+
+        for (int i = 0; i < K; i += WMMA_K) {
+            int aRow = warpM * WMMA_M;
+            int aCol = i;
+            int bRow = i;
+            int bCol = warpN * WMMA_N;
+        
+            int aBatch = batch * M * K;
+            int bBatch = batch * K * N;
+            int aOffset = aBatch + aRow * lda + aCol;
+            int bOffset = bBatch + bRow * ldb + bCol; 
+
+            if (aRow < M && aCol < K && bRow < K && bCol < N) {
+                wmma::load_matrix_sync(a_frag, a + aOffset, lda);
+                wmma::load_matrix_sync(b_frag, b + bOffset, ldb);
+                wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+            }
+        }
+
+        if (cRow < M && cCol < N) {
+            wmma::store_matrix_sync(c + cBatch + cRow * ldc + cCol, acc_frag, ldc, wmma::mem_row_major);
+        }
+    }
+}
 
 
 template <typename T, typename Acc>
@@ -443,17 +492,14 @@ double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
     CUDA_CHECK(cudaMemcpy(d_B, h_B, bytesB, cudaMemcpyHostToDevice));
 
     int BLKSIZE = 16;
-    if(M != N || M != K || N != K){
-        return -1;
-    }
-
     dim3 blockDim(128, 4);
     dim3 gridDim;
     gridDim.x = (M + (BLKSIZE * blockDim.x / 32 - 1)) / (BLKSIZE * blockDim.x / 32);
-    gridDim.y = 1;
+    gridDim.y = (N + (BLKSIZE * blockDim.y) - 1) / (BLKSIZE * blockDim.y);
     gridDim.z = 1;
 
-    // Warm-up: specifichiamo <T> al kernel
+    //warm-up
+    batched_mma_kernel<T, float><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -463,9 +509,7 @@ double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
-        if(M == N && M == K && N == K){
-            mma_kernel<T, float><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
-        }
+        batched_mma_kernel<T, float><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
