@@ -64,8 +64,6 @@ int main() {
 
         char cpu_ms_str[32];
         char rel_err_str[32];
-            
-        cudaEventRecord(start);
 
         stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
                             s.N, s.M, s.K,
@@ -74,14 +72,27 @@ int main() {
                             d_A, CUDA_R_32F, s.K, s.N*s.K,
                             &beta,
                             d_C, CUDA_R_32F, s.N, s.M*s.N, s.Bsize,
-                            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);;
+                            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+            
+        cudaEventRecord(start);
+
+        for (int r = 0;r < 10 ;r++){
+            stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                s.N, s.M, s.K,
+                                &alpha,
+                                d_B, CUDA_R_32F, s.N, s.M*s.K,
+                                d_A, CUDA_R_32F, s.K, s.N*s.K,
+                                &beta,
+                                d_C, CUDA_R_32F, s.N, s.M*s.N, s.Bsize,
+                                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        }
 
         cudaEventRecord(stop);
         cudaEventSynchronize(stop);
         cudaMemcpy(C_cpu.data(), d_C, s.M * s.N * s.Bsize *sizeof(float), cudaMemcpyDeviceToHost);
 
         if(s.reference == nullptr){
-            float *ref = new float[bytesC];
+            float *ref = new float[s.M * s.N * s.Bsize];
             cudaMemcpy(ref, d_C, bytesC, cudaMemcpyDeviceToHost);
             s.reference = ref;
         }
@@ -103,6 +114,8 @@ int main() {
         }
             
         cudaEventElapsedTime(&gpu_ms, start, stop);
+
+        gpu_ms = gpu_ms / 10;
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
 
 
@@ -277,8 +290,6 @@ int main() {
 
         float gpu_ms = 0;
 
-        cudaEventRecord(start);
-
         stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
                             s.N, s.M, s.K,
                             &alpha,
@@ -288,6 +299,18 @@ int main() {
                             d_C, CUDA_R_16F, s.N, s.M*s.N, s.Bsize,
                             CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
 
+        cudaEventRecord(start);
+
+        for(int r = 0; r < 10; r++){
+            stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                s.N, s.M, s.K,
+                                &alpha,
+                                d_B, CUDA_R_16F, s.N, s.M*s.K,
+                                d_A, CUDA_R_16F, s.K, s.N*s.K,
+                                &beta,
+                                d_C, CUDA_R_16F, s.N, s.M*s.N, s.Bsize,
+                                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        }
         cudaEventRecord(stop);
         cudaEventSynchronize(stop);
         if(stat != CUBLAS_STATUS_SUCCESS){
@@ -298,6 +321,7 @@ int main() {
         cudaEventElapsedTime(&gpu_ms, start, stop);
 
 
+        gpu_ms = gpu_ms / 10;
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
        
         double max_abs_err;
@@ -307,7 +331,7 @@ int main() {
         char rel_err_str[32];
 
         if(s.verify_cpu){
-            std::vector<__half> C_gpu(bytesC);
+            std::vector<__half> C_gpu(s.M * s.N * s.Bsize);
             cudaMemcpy(C_gpu.data(), d_C, bytesC, cudaMemcpyDeviceToHost);
             compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
             float cpu_ms = 0;
@@ -347,7 +371,7 @@ int main() {
         size_t bytesB = static_cast<size_t>(s.K) * s.N * s.Bsize * sizeof(__nv_bfloat16);
         size_t bytesC = static_cast<size_t>(s.M) * s.N * s.Bsize * sizeof(__nv_bfloat16);
 
-        __half *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+        __nv_bfloat16 *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
 
         cudaMalloc(&d_A, bytesA);
         cudaMalloc(&d_B, bytesB);
@@ -371,18 +395,30 @@ int main() {
         cudaEvent_t start, stop;
         cudaEventCreate(&start);
         cudaEventCreate(&stop);
-
+        
+        //warmup
+        stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                    s.N, s.M, s.K,
+                                    &alpha,
+                                    d_B, CUDA_R_16BF, s.N, s.M*s.K,
+                                    d_A, CUDA_R_16BF, s.K, s.N*s.K,
+                                    &beta,
+                                    d_C, CUDA_R_16BF, s.N, s.M*s.N, s.Bsize,
+                                    CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+            
 
         cudaEventRecord(start);
 
-        stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                            s.N, s.M, s.K,
-                            &alpha,
-                            d_B, CUDA_R_16BF, s.N, s.M*s.K,
-                            d_A, CUDA_R_16BF, s.K, s.N*s.K,
-                            &beta,
-                            d_C, CUDA_R_16BF, s.N, s.M*s.N, s.Bsize,
-                            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        for(int r=0;r < 10; r++){
+            stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                s.N, s.M, s.K,
+                                &alpha,
+                                d_B, CUDA_R_16BF, s.N, s.M*s.K,
+                                d_A, CUDA_R_16BF, s.K, s.N*s.K,
+                                &beta,
+                                d_C, CUDA_R_16BF, s.N, s.M*s.N, s.Bsize,
+                                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        }
 
         cudaEventRecord(stop);
         cudaEventSynchronize(stop);
@@ -394,8 +430,8 @@ int main() {
         cudaEventElapsedTime(&gpu_ms, start, stop);
 
 
+        gpu_ms = gpu_ms/10;
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
-       
         double max_abs_err;
         double mean_rel_err;
 
@@ -403,7 +439,7 @@ int main() {
         char rel_err_str[32];
 
         if(s.verify_cpu){
-            std::vector<__half> C_gpu(bytesC);
+            std::vector<__nv_bfloat16> C_gpu(s.M * s.N * s.Bsize);
             cudaMemcpy(C_gpu.data(), d_C, bytesC, cudaMemcpyDeviceToHost);
             compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
             float cpu_ms = 0;
@@ -509,7 +545,7 @@ int main() {
                cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
     }
 
- printf("------------------BFLOAT 16 -- Tensor Core Basic -----------------\n");
+ printf("------------------FLOAT 16 / F32 Accumulation -- Tensor Core Basic -----------------\n");
     printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
            "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");

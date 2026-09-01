@@ -56,10 +56,22 @@ inline std::vector<GemmShape> default_shapes() {
         {256,  256,  256, 1,  true,  "square-small", nullptr},
         {1024, 1024, 1024, 1, true,  "square-medium", nullptr},
         {4096, 4096, 4096, 1, true, "square-large", nullptr},
-        {4096, 1024, 1024, 1, true,  "tall-skinny (batch*seq x hidden)", nullptr},
+        {8192, 8192, 8192, 1, true, "square-max", nullptr},
+        {16384, 16384, 16384, 1, true, "square-Xlarge", nullptr},
+
+        {2048, 1024, 1024, 1, true,  "tall-skinny-small", nullptr},
+        {4096, 1024, 1024, 1, true,  "tall-skinny-medium", nullptr},
+        {8192, 1024, 1024, 1, true,  "tall-skinny-large", nullptr},
+        {16384, 1024, 1024, 1, true,  "tall-skinny-max", nullptr},
+
         {4096, 4096, 1024, 1, true, "FFN up-projection (hidden -> 4*hidden)", nullptr},
         {4096, 1024, 4096, 1, true, "FFN down-projection (4*hidden -> hidden)", nullptr},
-        {256,  256,  256, 2,  true,  "square-small-B2", nullptr},
+
+        {1024,  1024,  1024, 8,  true,  "square-batch-small", nullptr},
+        {1024,  1024,  1024, 16,  true,  "square-batch-medium", nullptr},
+        {1024,  1024,  1024, 32,  true,  "square-batch-large", nullptr},
+        {1024,  1024,  1024, 64,  true,  "square-batch-XLarge", nullptr},
+        {1024,  1024,  1024, 128,  true,  "square-batch-max", nullptr},
     };
 }
 

@@ -472,6 +472,54 @@ __global__ void batched_mma_kernel(T *a, T *b, Acc *c, int M, int N, int K, int 
     }
 }
 
+template <typename T, typename Acc>
+__global__ void batched_mma_kernel_staging(T *a, T *b, Acc *c, int M, int N, int K, int Bsize) {
+    const int WMMA_M = 16;
+    const int WMMA_N = 16;
+    const int WMMA_K = 16;
+ 
+    int lda = K;
+    int ldb = N;
+    int ldc = N;
+
+    int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+    int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
+
+    wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> b_frag;
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, Acc> acc_frag;
+
+        // Loop over the K-dimension
+    for(int batch = 0; batch < Bsize; batch++){
+        wmma::fill_fragment(acc_frag, 0.0f);
+        int cBatch = batch * M * N;
+        int cRow = warpM * WMMA_M;
+        int cCol = warpN * WMMA_N;
+
+        for (int i = 0; i < K; i += WMMA_K) {
+            int aRow = warpM * WMMA_M;
+            int aCol = i;
+            int bRow = i;
+            int bCol = warpN * WMMA_N;
+        
+            int aBatch = batch * M * K;
+            int bBatch = batch * K * N;
+            int aOffset = aBatch + aRow * lda + aCol;
+            int bOffset = bBatch + bRow * ldb + bCol; 
+
+            if (aRow < M && aCol < K && bRow < K && bCol < N) {
+                wmma::load_matrix_sync(a_frag, a + aOffset, lda);
+                wmma::load_matrix_sync(b_frag, b + bOffset, ldb);
+                wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+            }
+        }
+
+        if (cRow < M && cCol < N) {
+            wmma::store_matrix_sync(c + cBatch + cRow * ldc + cCol, acc_frag, ldc, wmma::mem_row_major);
+        }
+    }
+}
+
 
 template <typename T, typename Acc>
 double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
