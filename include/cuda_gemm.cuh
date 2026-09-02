@@ -318,6 +318,7 @@ __global__ void gemm_tiled_kernel_2D(const T* __restrict__ A,
 }
 
 
+
 template <typename T>
 double gemm_tiled_timed_2D(const T* h_A, const T* h_B, T* h_C,
                          int M, int N, int K, int Bsize, int n_reps = 10) {
@@ -355,6 +356,168 @@ double gemm_tiled_timed_2D(const T* h_A, const T* h_B, T* h_C,
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
         gemm_tiled_kernel_2D<T, BM, BN, BK, TM, TN><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    }
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms_total = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
+    double ms_avg = static_cast<double>(ms_total) / n_reps;
+
+    CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_A));
+    CUDA_CHECK(cudaFree(d_B));
+    CUDA_CHECK(cudaFree(d_C));
+
+    return ms_avg;
+}
+
+template <typename T, int BM, int BN, int BK, int TM, int TN, int WN, int WM>
+__global__ void gemm_warptiled_kernel(const T* __restrict__ A,
+                                   const T* __restrict__ B,
+                                   T* __restrict__ C,
+                                   int M, int N, int K, int Bsize) {
+    const int block_row = blockIdx.y * BM;
+    const int block_col = blockIdx.x * BN;
+    const int batch     = blockIdx.z;
+    const int WNITER    = 2;
+
+    constexpr int WARPSIZE = 32;
+    const int warpIdx = threadIdx.x / WARPSIZE;
+    const int warpCol = warpIdx % (BN / WN);
+    const int warpRow = warpIdx / (BN / WN);
+
+    constexpr int WMITER = WN * WM / (TN * TM * WARPSIZE * WNITER);
+    constexpr int WSUBM = WM / WMITER;
+    constexpr int WSUBN = WN / WNITER;
+
+    //Thread in the subtile
+    const int threadIdxWarp = threadIdx.x % WARPSIZE;
+    const int threadColWarp = threadIdxWarp % (WSUBN / TN);
+    const int threadRowWarp = threadIdxWarp / (WSUBN / TN);
+
+
+    __shared__ T As[BM * BK];
+    __shared__ T Bs[BK * BN];
+
+    const T* A_batch = A + static_cast<size_t>(batch) * M * K;
+    const T* B_batch = B + static_cast<size_t>(batch) * K * N;
+    T*       C_batch = C + static_cast<size_t>(batch) * M * N;
+
+    const T* A_tile = A_batch + static_cast<size_t>(block_row) * K;
+    const T* B_tile = B_batch + block_col;
+    T*       C_tile = C_batch + static_cast<size_t>(block_row) * N + block_col;
+    int numThreads = (BM/WM)*(BN/WN)*WARPSIZE;
+
+    const int strideA = numThreads / BK;
+    const int innerRowA = threadIdx.x / BK;
+    const int innerColA = threadIdx.x % BK;
+
+    const int strideB = numThreads / BN;
+    const int innerRowB = threadIdx.x / BN;
+    const int innerColB = threadIdx.x % BN;
+
+    T a_val[WMITER * TM] = {0.0};
+    T b_val[WNITER * TN] = {0.0};
+    T thread_results[WMITER * TM * TN * WNITER] = {0.0};
+
+    for (int k0 = 0; k0 < K; k0 += BK) {
+        for (uint loadOffset = 0; loadOffset < BM; loadOffset += strideA) {
+            As[(innerRowA + loadOffset) * BK + innerColA] =
+                A_tile[(innerRowA + loadOffset) * K + innerColA];
+        }
+        for (uint loadOffset = 0; loadOffset < BK; loadOffset += strideB) {
+            Bs[(innerRowB + loadOffset) * BN + innerColB] =
+                B_tile[(innerRowB + loadOffset) * N + innerColB];
+        }
+        __syncthreads();
+
+        A_tile += BK;
+        B_tile += static_cast<size_t>(BK) * N;
+
+        #pragma unroll
+        for (int k = 0; k < BK; ++k) {
+            #pragma unroll
+            for (int i = 0; i < WMITER; ++i) {
+                for(int j = 0; j < TM; ++j)
+                    a_val[i * TM + j] = As[(warpRow * WM + i * WSUBM + threadRowWarp * TM + j) * BK + k];
+            }
+
+            for (int i = 0; i < WNITER; ++i) {
+                for(int j = 0; j < TN; ++j)
+                    b_val[i * TN + j] = Bs[k * BN + (warpCol * WN + i * WSUBN + threadColWarp * TN + j)];
+            }
+
+            for(int subRow = 0;subRow < WMITER; ++subRow){
+                for(int subCol = 0;subCol < WNITER; ++subCol){
+                    for(int i = 0; i < TM; ++i){
+                        for(int j = 0; j < TN; j++){
+                            thread_results[(subRow * TM + i) * (WNITER * TN) + (subCol * TN) + j] +=
+                            a_val[subRow * TM + i] * b_val[subCol * TN + j];
+                        }
+                    }
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    for(int subRow = 0;subRow < WMITER; ++subRow){
+        for(int subCol = 0;subCol < WNITER; ++subCol){
+            for(int i = 0; i < TM; ++i){
+                for(int j = 0; j < TN; j++){
+                    C_tile[(warpRow * WM + subRow * WSUBM + threadRowWarp * TM + i) * N
+                       + (warpCol * WN + subCol * WSUBN + threadColWarp * TN + j)]
+                        = thread_results[(subRow * TM + i) * (WNITER * TN) + (subCol * TN) + j];
+                }
+            }
+        }
+    }
+}
+
+template <typename T>
+double gemm_warptiled_timed(const T* h_A, const T* h_B, T* h_C,
+                         int M, int N, int K, int Bsize, int n_reps = 10) {
+    constexpr int BM = 64, BN = 64, BK = 8, TM = 4, TN = 4, WN = 32, WM = 64;
+
+    // Versione semplice: nessuna gestione dei bordi. M/N/K devono essere
+    // multipli di BM/BN/BK -- tutte le shape della consegna attuale lo sono.
+    if (M % BM != 0 || N % BN != 0 || K % BK != 0) {
+        fprintf(stderr, "gemm_tiled_timed: M/N/K devono essere multipli di %d/%d/%d\n", BM, BN, BK);
+        exit(EXIT_FAILURE);
+    }
+
+    size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
+    size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
+    size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(T);
+
+    T *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_A, bytesA));
+    CUDA_CHECK(cudaMalloc(&d_B, bytesB));
+    CUDA_CHECK(cudaMalloc(&d_C, bytesC));
+    CUDA_CHECK(cudaMemcpy(d_A, h_A, bytesA, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_B, h_B, bytesB, cudaMemcpyHostToDevice));
+
+    const int WARPSIZE = 32;
+    const int NUM_WARPS = (BM/WM) * (BN/WN);
+    const int NUM_THREADS = NUM_WARPS * WARPSIZE;
+    dim3 blockDim(NUM_THREADS);          // 512 thread, 1D
+    dim3 gridDim(N / BN, M / BM, Bsize);
+
+    gemm_warptiled_kernel<T, BM, BN, BK, TM, TN, WN, WM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int r = 0; r < n_reps; ++r) {
+        gemm_warptiled_kernel<T, BM, BN, BK, TM, TN, WN, WM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
