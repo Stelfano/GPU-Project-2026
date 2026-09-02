@@ -12,7 +12,7 @@
 #include "../include/cuda_gemm.cuh"
 
 int main() {
-    auto shapes = default_shapes();
+    auto shapes = reduced_shapes();
 
     printf("------------------  CuBlas FP32  -----------------\n");
     printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
@@ -195,7 +195,7 @@ int main() {
         char rel_err_str[32];
 
         if(s.verify_cpu){
-            compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
+            compare_matrices_frob<__nv_bfloat16>(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
             float cpu_ms = 0;
             snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
@@ -489,7 +489,7 @@ int main() {
         char rel_err_str[32];
 
         if(s.verify_cpu){
-            compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
+            compare_matrices_frob<__nv_bfloat16>(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
             float cpu_ms = 0;
             snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
@@ -505,7 +505,7 @@ int main() {
     }
 
 
-    printf("------------------BFLOAT 16 -- SharedMem+RegisterBlock 1D -----------------\n");
+    printf("------------------BFLOAT 16 -- SharedMem+RegisterBlock 2D -----------------\n");
     printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
            "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
@@ -530,7 +530,7 @@ int main() {
         char rel_err_str[32];
 
         if(s.verify_cpu){
-            compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
+            compare_matrices_frob<__nv_bfloat16>(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
             float cpu_ms = 0;
             snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);

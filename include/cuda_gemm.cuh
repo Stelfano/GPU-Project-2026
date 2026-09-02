@@ -249,11 +249,8 @@ __global__ void gemm_tiled_kernel_2D(const T* __restrict__ A,
     __shared__ T As[BM * BK];
     __shared__ T Bs[BK * BN];
 
-    // Ogni thread possiede una colonna fissa (thread_col) e TM righe
-    // consecutive a partire da thread_row*TM: e' qui che si decide il
-    // register blocking.
-    const int thread_col = threadIdx.x % BN;
-    const int thread_row = threadIdx.x / BN;   // 0 .. (BM/TM - 1)
+    const int thread_col = threadIdx.x % (BN / TN);
+    const int thread_row = threadIdx.x / (BN / TN);
 
     const T* A_batch = A + static_cast<size_t>(batch) * M * K;
     const T* B_batch = B + static_cast<size_t>(batch) * K * N;
@@ -262,40 +259,52 @@ __global__ void gemm_tiled_kernel_2D(const T* __restrict__ A,
     const T* A_tile = A_batch + static_cast<size_t>(block_row) * K;
     const T* B_tile = B_batch + block_col;
     T*       C_tile = C_batch + static_cast<size_t>(block_row) * N + block_col;
+    int numThreads = (BM/TM) * (BN/TN);
 
-    // Caricamento cooperativo: ogni thread porta in shared memory
-    // esattamente un elemento di As e uno di Bs per iterazione
-    // (BM*BK e BK*BN sono entrambi multipli del numero di thread/blocco).
-    const int inner_row_a = threadIdx.x / BK;
-    const int inner_col_a = threadIdx.x % BK;
-    const int inner_row_b = threadIdx.x / BN;
-    const int inner_col_b = threadIdx.x % BN;
+    const int strideA = numThreads / BK;
+    const int innerRowA = threadIdx.x / BK;
+    const int innerColA = threadIdx.x % BK;
 
-    T acc[TM];
-    #pragma unroll
-    for (int i = 0; i < TM; ++i) acc[i] = static_cast<T>(0.0f);
+    const int strideB = numThreads / BN;
+    const int innerRowB = threadIdx.x / BN;
+    const int innerColB = threadIdx.x % BN;
 
     T a_val[TM] = {0.0};
     T b_val[TN] = {0.0};
+    T thread_results[TM * TN] = {0.0};
+
 
     for (int k0 = 0; k0 < K; k0 += BK) {
-        As[inner_row_a * BK + inner_col_a] = A_tile[static_cast<size_t>(inner_row_a) * K + inner_col_a];
-        Bs[inner_row_b * BN + inner_col_b] = B_tile[static_cast<size_t>(inner_row_b) * N + inner_col_b];
+        for (uint loadOffset = 0; loadOffset < BM; loadOffset += strideA) {
+            As[(innerRowA + loadOffset) * BK + innerColA] =
+                A_tile[(innerRowA + loadOffset) * K + innerColA];
+        }
+        for (uint loadOffset = 0; loadOffset < BK; loadOffset += strideB) {
+            Bs[(innerRowB + loadOffset) * BN + innerColB] =
+                B_tile[(innerRowB + loadOffset) * N + innerColB];
+        }
         __syncthreads();
 
         A_tile += BK;
         B_tile += static_cast<size_t>(BK) * N;
 
-        T thread_results[TM * TN] = {0.0};
 
         #pragma unroll
         for (int k = 0; k < BK; ++k) {
+            T a_val[TM] = {0.0};
+            T b_val[TN] = {0.0};
             #pragma unroll
             for (int i = 0; i < TM; ++i) {
                 a_val[i] = As[(thread_row * TM + i) * BK + k];
             }
-            for(int i=0;i<TN;++i){
+            for(int i = 0;i < TN; ++i){
                 b_val[i] = Bs[k * BN + thread_col * TN + i];
+            }
+
+            for(int i = 0;i < TM;i++){
+                for(int j = 0;j < TN; j++){
+                    thread_results[i * TN + j] += a_val[i] * b_val[j];
+                }
             }
         }
         __syncthreads();
@@ -304,7 +313,7 @@ __global__ void gemm_tiled_kernel_2D(const T* __restrict__ A,
     #pragma unroll
     for (int i = 0; i < TM; ++i) {
         for(int j = 0; j < TN; j++)
-            C_tile[static_cast<size_t>(i * TM + j) * N + thread_col] = a_val[i] * b_val[j];
+            C_tile[static_cast<size_t>(thread_row * TM + i) * N + (thread_col * TN + j)] = thread_results[i * TN + j]; 
     }
 }
 
@@ -312,7 +321,7 @@ __global__ void gemm_tiled_kernel_2D(const T* __restrict__ A,
 template <typename T>
 double gemm_tiled_timed_2D(const T* h_A, const T* h_B, T* h_C,
                          int M, int N, int K, int Bsize, int n_reps = 10) {
-    constexpr int BM = 64, BN = 64, BK = 8, TM = 8;
+    constexpr int BM = 64, BN = 64, BK = 8, TM = 8, TN = 8;
 
     // Versione semplice: nessuna gestione dei bordi. M/N/K devono essere
     // multipli di BM/BN/BK -- tutte le shape della consegna attuale lo sono.
@@ -332,10 +341,10 @@ double gemm_tiled_timed_2D(const T* h_A, const T* h_B, T* h_C,
     CUDA_CHECK(cudaMemcpy(d_A, h_A, bytesA, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_B, h_B, bytesB, cudaMemcpyHostToDevice));
 
-    dim3 blockDim((BM * BN) / TM);          // 512 thread, 1D
+    dim3 blockDim((BM / TM) * (BN / TN));          // 512 thread, 1D
     dim3 gridDim(N / BN, M / BM, Bsize);
 
-    gemm_tiled_kernel<T, BM, BN, BK, TM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    gemm_tiled_kernel_2D<T, BM, BN, BK, TM, TN><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -345,7 +354,7 @@ double gemm_tiled_timed_2D(const T* h_A, const T* h_B, T* h_C,
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
-        gemm_tiled_kernel<T, BM, BN, BK, TM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        gemm_tiled_kernel_2D<T, BM, BN, BK, TM, TN><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));

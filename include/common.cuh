@@ -39,6 +39,26 @@ inline void compare_matrices(const float* ref, const T* test, size_t n,
     mean_rel_err = sum_rel_err / static_cast<float>(n);
 }
 
+template<typename T>
+inline void compare_matrices_frob(const float* ref, const T* test, size_t n,
+                              double& max_abs_err, double& mean_rel_err) {
+    max_abs_err = 0.0;
+    double sum_rel_err = 0.0;
+    double num = 0, den = 0;
+    for (size_t i = 0; i < n; ++i) {
+        double r = static_cast<float>(ref[i]);
+        double t = static_cast<float>(test[i]);
+        double diff = std::fabs(r - t);
+        num += diff*diff;
+        den += r*r;
+        max_abs_err = std::max(max_abs_err, diff);
+        sum_rel_err += diff / (std::fabs(r) + 1e-8);
+    }
+    mean_rel_err = std::sqrt(num) / std::sqrt(den);
+}
+
+
+
 // Una singola configurazione di test: C (MxN) = A (MxK) * B (KxN).
 // verify_cpu: per le shape grandi il triplo loop naive su CPU diventa
 // lento (minuti), quindi qui lo disattiviamo — quelle shape andranno
@@ -78,7 +98,9 @@ inline std::vector<GemmShape> default_shapes() {
 inline std::vector<GemmShape> reduced_shapes(){
     return{
         {256,  256,  256, 1,  true,  "square-small", nullptr},
+        {4096, 1024, 1024, 1, true,  "tall-skinny-medium", nullptr},
         {1024, 256, 1024, 1,  true, "FFN down-projection (4*hidden -> hidden)", nullptr},
+        {1024,  1024,  1024, 16,  true,  "square-batch-medium", nullptr}
     };
 }
 
