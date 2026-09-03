@@ -4,6 +4,8 @@
 #include <cstdio>
 #include "common.cuh"
 #include <mma.h>
+#include <cooperative_groups/memcpy_async.h>
+#include <cuda/pipeline>
 
 using namespace nvcuda;
 
@@ -644,54 +646,6 @@ __global__ void batched_mma_kernel(T *a, T *b, Acc *c, int M, int N, int K, int 
     }
 }
 
-template <typename T, typename Acc>
-__global__ void batched_mma_kernel_staging(T *a, T *b, Acc *c, int M, int N, int K, int Bsize) {
-    const int WMMA_M = 16;
-    const int WMMA_N = 16;
-    const int WMMA_K = 16;
- 
-    int lda = K;
-    int ldb = N;
-    int ldc = N;
-
-    int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
-    int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
-
-    wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> a_frag;
-    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> b_frag;
-    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, Acc> acc_frag;
-
-        // Loop over the K-dimension
-    for(int batch = 0; batch < Bsize; batch++){
-        wmma::fill_fragment(acc_frag, 0.0f);
-        int cBatch = batch * M * N;
-        int cRow = warpM * WMMA_M;
-        int cCol = warpN * WMMA_N;
-
-        for (int i = 0; i < K; i += WMMA_K) {
-            int aRow = warpM * WMMA_M;
-            int aCol = i;
-            int bRow = i;
-            int bCol = warpN * WMMA_N;
-        
-            int aBatch = batch * M * K;
-            int bBatch = batch * K * N;
-            int aOffset = aBatch + aRow * lda + aCol;
-            int bOffset = bBatch + bRow * ldb + bCol; 
-
-            if (aRow < M && aCol < K && bRow < K && bCol < N) {
-                wmma::load_matrix_sync(a_frag, a + aOffset, lda);
-                wmma::load_matrix_sync(b_frag, b + bOffset, ldb);
-                wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-            }
-        }
-
-        if (cRow < M && cCol < N) {
-            wmma::store_matrix_sync(c + cBatch + cRow * ldc + cCol, acc_frag, ldc, wmma::mem_row_major);
-        }
-    }
-}
-
 
 template <typename T, typename Acc>
 double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
@@ -730,6 +684,193 @@ double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
         batched_mma_kernel<T, float><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    }
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms_total = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
+    double ms_avg = static_cast<double>(ms_total) / n_reps;
+
+    CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_A));
+    CUDA_CHECK(cudaFree(d_B));
+    CUDA_CHECK(cudaFree(d_C));
+
+    return ms_avg;
+}
+
+
+
+template <typename T, typename Acc, int STAGES = 3>
+__global__ void batched_staged_mma_kernel_ampere(
+    const T * __restrict__ a, 
+    const T * __restrict__ b, 
+    Acc * __restrict__ c, 
+    int M, int N, int K, int Bsize) 
+{
+    const int WMMA_M = 16, WMMA_N = 16, WMMA_K = 16;
+    const int BLKSIZE = 64;
+    const int SMEM_STRIDE = 72; // Padding +8 per azzerare i Bank Conflicts
+
+    int block_row = blockIdx.x * BLKSIZE;
+    int block_col = blockIdx.y * BLKSIZE;
+    int batch     = blockIdx.z;
+
+    int tid    = threadIdx.x + threadIdx.y * blockDim.x; // 0..511
+    int warpId = tid / 32;                            // 0..15
+    int warpM  = warpId / 4;                          // Griglia 4x4
+    int warpN  = warpId % 4;
+
+    if (block_row >= M || block_col >= N) return;
+
+    // Shared memory multi-stage: sA e sB ridimensionati per 'STAGES'
+    __shared__ alignas(16) T sA[STAGES][BLKSIZE * SMEM_STRIDE];
+    __shared__ alignas(16) T sB[STAGES][BLKSIZE * SMEM_STRIDE];
+
+    int tiles = (K + BLKSIZE - 1) / BLKSIZE;
+    if (tiles == 0) return;
+
+    cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
+
+    // Lambda di caricamento asincrono sul buffer indicato dallo stage
+    auto load_tile_async = [&](int stage_idx, int k_tile) {
+        const T* a_batch = a + (size_t)batch * M * K;
+        const T* b_batch = b + (size_t)batch * K * N;
+
+        int num_threads = blockDim.x * blockDim.y; // 512
+
+        pipe.producer_acquire();
+
+        for (int i = tid; i < 512; i += num_threads) {
+            int r = i / 8;
+            int col_offset = (i % 8) * 8;
+            int smem_idx = r * SMEM_STRIDE + col_offset;
+
+            // --- MATRICE A ---
+            int g_row_a = block_row + r;
+            int g_col_a = k_tile * BLKSIZE + col_offset;
+
+            cuda::memcpy_async(&sA[stage_idx][smem_idx], 
+                                &a_batch[g_row_a * K + g_col_a], 
+                                sizeof(int4), pipe);
+            // --- MATRICE B ---
+            int g_row_b = k_tile * BLKSIZE + r;
+            int g_col_b = block_col + col_offset;
+
+            cuda::memcpy_async(&sB[stage_idx][smem_idx], 
+                                &b_batch[g_row_b * N + g_col_b], 
+                                sizeof(int4), pipe);
+        }
+
+        pipe.producer_commit();
+    };
+
+    wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, T, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, T, wmma::row_major> b_frag;
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, Acc> acc_frag;
+
+    wmma::fill_fragment(acc_frag, Acc(0));
+
+    // =========================================================================
+    // 1. PREAMBOLO PIPELINE: Riempie i primi (STAGES - 1) slot
+    // =========================================================================
+    int fetch_tile = 0;
+    for (; fetch_tile < (STAGES - 1) && fetch_tile < tiles; ++fetch_tile) {
+        load_tile_async(fetch_tile % STAGES, fetch_tile);
+    }
+
+    // =========================================================================
+    // 2. MAIN PIPELINE LOOP (Multi-Stage Overlapping)
+    // =========================================================================
+    for (int compute_tile = 0; compute_tile < tiles; ++compute_tile) {
+        
+        // Attesa del tile corrente da elaborare
+        pipe.consumer_wait();
+        __syncthreads();
+
+        int read_stage = compute_tile % STAGES;
+
+        // Se ci sono ancora tile da caricare, accoda il tile (compute_tile + STAGES - 1)
+        if (fetch_tile < tiles) {
+            load_tile_async(fetch_tile % STAGES, fetch_tile);
+            fetch_tile++;
+        }
+
+        // Calcolo WMMA sul tile pronto
+        #pragma unroll
+        for (int k_sub = 0; k_sub < 4; ++k_sub) {
+            int sa_offset = (warpM * WMMA_M) * SMEM_STRIDE + (k_sub * WMMA_K);
+            int sb_offset = (k_sub * WMMA_K) * SMEM_STRIDE + (warpN * WMMA_N);
+
+            wmma::load_matrix_sync(a_frag, &sA[read_stage][sa_offset], SMEM_STRIDE);
+            wmma::load_matrix_sync(b_frag, &sB[read_stage][sb_offset], SMEM_STRIDE);
+
+            wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+        }
+
+        pipe.consumer_release();
+    }
+
+    // =========================================================================
+    // 3. STORE FINALE IN GLOBAL MEMORY
+    // =========================================================================
+    int g_row_c = block_row + warpM * WMMA_M;
+    int g_col_c = block_col + warpN * WMMA_N;
+
+    if (g_row_c < M && g_col_c < N) {
+        Acc* c_batch = c + (size_t)batch * M * N;
+        wmma::store_matrix_sync(&c_batch[g_row_c * N + g_col_c], acc_frag, N, wmma::mem_row_major);
+    }
+}
+
+
+template <typename T, typename Acc>
+double gemm_tensor_staged_timed(const T* h_A, const T* h_B, Acc* h_C,
+                       int M, int N, int K, int Bsize, int n_reps) {
+    constexpr int STAGES = 3;
+    const int BLKSIZE = 64;
+    const int SMEM_STRIDE = 72;
+    size_t req_smem = STAGES * 2 * BLKSIZE * SMEM_STRIDE * sizeof(half); // ~55296 Byte per STAGES=3
+    size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
+    size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
+    size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(Acc);
+    CUDA_CHECK(cudaFuncSetAttribute(
+    batched_staged_mma_kernel_ampere<half, float, STAGES>,
+    cudaFuncAttributeMaxDynamicSharedMemorySize,
+    req_smem
+    ));
+
+    T *d_A = nullptr, *d_B = nullptr;
+    Acc *d_C = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_A, bytesA));
+    CUDA_CHECK(cudaMalloc(&d_B, bytesB));
+    CUDA_CHECK(cudaMalloc(&d_C, bytesC));
+
+    CUDA_CHECK(cudaMemcpy(d_A, h_A, bytesA, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_B, h_B, bytesB, cudaMemcpyHostToDevice));
+
+    dim3 blockDim(128, 4, 1); // 512 Thread = 16 Warp
+    dim3 gridDim((M + BLKSIZE - 1) / BLKSIZE, (N + BLKSIZE - 1) / BLKSIZE, Bsize);
+
+    batched_staged_mma_kernel_ampere<half, float, STAGES><<<gridDim, blockDim>>>(
+    d_A, d_B, d_C, M, N, K, Bsize
+);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int r = 0; r < n_reps; ++r) {
+        batched_staged_mma_kernel_ampere<half, float, STAGES><<<gridDim, blockDim>>>(
+    d_A, d_B, d_C, M, N, K, Bsize
+);
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
