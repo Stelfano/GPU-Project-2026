@@ -12,7 +12,7 @@
 #include "../include/cuda_gemm.cuh"
 
 int main() {
-    auto shapes = large_shapes();
+    auto shapes = default_shapes();
 
     printf("------------------  CuBlas FP32  -----------------\n");
     printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
