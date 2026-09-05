@@ -135,7 +135,7 @@ int main() {
         generate_matrix<float>(B, s.K, s.N, s.Bsize,/*seed=*/5678, 1.0f);
 
         std::vector<float> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
-        double gpu_ms = gemm_cuda_timed<float, float, false, false>(A.data(), B.data(), C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
+        double gpu_ms = gemm_cuda_timed<float, float, true, false>(A.data(), B.data(), C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
 
         double max_abs_err;

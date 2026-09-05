@@ -34,7 +34,11 @@ __global__ void gemm_naive_kernel(const T* __restrict__ A,const T* __restrict__ 
             acc += (float)A[static_cast<size_t>(row) * K + k + batch*(M*K)] * (float)B[static_cast<size_t>(k) * N + col + batch*(K*N)];
         }
 
-        C[static_cast<size_t>(row) * N + col + batch*(M*N)] = acc;
+        if constexpr (Fusion){
+             C[static_cast<size_t>(row) * N + col + batch*(M*N)] = max(0.0f, acc);
+        }else{
+            C[static_cast<size_t>(row) * N + col + batch*(M*N)] = acc;
+        }
     }
 }
 
@@ -75,7 +79,12 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K
                  (Bsize + blockDim.z - 1) / blockDim.z);
 
     
-    gemm_naive_kernel<T, Acc, Fusion, Epl><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    if constexpr (Epl){
+        gemm_naive_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        naiveReLU<Acc><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+    }else{
+        gemm_naive_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    }
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -85,8 +94,12 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
-        gemm_naive_kernel<T, Acc, Fusion, Epl><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
-        //naiveReLU<T><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+        if constexpr (Epl){
+            gemm_naive_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+            naiveReLU<T><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+        }else{
+            gemm_naive_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        }
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
