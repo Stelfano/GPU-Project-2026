@@ -42,6 +42,32 @@ __global__ void gemm_naive_kernel(const T* __restrict__ A,const T* __restrict__ 
     }
 }
 
+template <typename T, typename Acc>
+__global__ void gemm_splitk_atomic_kernel(
+    const T* __restrict__ A, const T* __restrict__ B, Acc* __restrict__ C, int M, int N, int K, int Bsize, int SplitK)
+{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int batch  = blockIdx.z / SplitK;
+    int kSplit = blockIdx.z % SplitK;
+
+    if (row >= M || col >= N || batch >= Bsize) return;
+
+    int kPerSplit = (K + SplitK - 1) / SplitK;
+    int kStart = kSplit * kPerSplit;
+    int kEnd   = min(kStart + kPerSplit, K);
+    if (kStart >= kEnd) return;
+
+    Acc acc = 0.0f;
+    for (int k = kStart; k < kEnd; k++) {
+        acc += (float)A[static_cast<size_t>(row) * K + k + batch*(size_t)(M*K)]
+             * (float)B[static_cast<size_t>(k) * N + col + batch*(size_t)(K*N)];
+    }
+
+    size_t idx = static_cast<size_t>(row) * N + col + batch*(size_t)(M*N);
+    atomicAdd(&C[idx], acc);   
+}
 
 template <typename Acc>
 __global__ void naiveReLU(Acc *C, int M, int N, int Bsize){
@@ -72,6 +98,7 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K
 
     CUDA_CHECK(cudaMemcpy(d_A, h_A, bytesA, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_B, h_B, bytesB, cudaMemcpyHostToDevice));
+    const int SplitK = 4;
 
     dim3 blockDim(16, 16, 1);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
@@ -93,11 +120,21 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K
     CUDA_CHECK(cudaEventCreate(&stop));
 
     CUDA_CHECK(cudaEventRecord(start));
+    
     for (int r = 0; r < n_reps; ++r) {
         if constexpr (Epl){
-            gemm_naive_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
-            naiveReLU<T><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
-        }else{
+            if constexpr (Fusion){
+                dim3 gridDimSplitK((N + blockDim.x - 1) / blockDim.x,
+                    (M + blockDim.y - 1) / blockDim.y,
+                    Bsize * SplitK);
+
+                CUDA_CHECK(cudaMemsetAsync(d_C, 0, bytesC));
+                gemm_splitk_atomic_kernel<T, Acc><<<gridDimSplitK, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize, SplitK);
+            } else {
+                gemm_naive_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+                naiveReLU<Acc><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+            }
+        } else {
             gemm_naive_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
         }
     }

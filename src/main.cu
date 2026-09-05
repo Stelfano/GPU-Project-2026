@@ -135,7 +135,7 @@ int main() {
         generate_matrix<float>(B, s.K, s.N, s.Bsize,/*seed=*/5678, 1.0f);
 
         std::vector<float> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
-        double gpu_ms = gemm_cuda_timed<float, float, true, false>(A.data(), B.data(), C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
+        double gpu_ms = gemm_cuda_timed<float, float, true, true>(A.data(), B.data(), C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
 
         double max_abs_err;
@@ -158,8 +158,8 @@ int main() {
 
     
     printf("------------------BFLOAT 16-----------------\n");
-    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("%-38s %6s %6s %6s %6s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
 
     for (const auto& s : shapes) {
@@ -175,29 +175,25 @@ int main() {
         double max_abs_err;
         double mean_rel_err;
 
-        char cpu_ms_str[32];
         char rel_err_str[32];
 
         if(s.verify_cpu){
             compare_matrices_frob<float>(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
-            float cpu_ms = 0;
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
         }else{
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
             snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
         }
 
 
-        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+        printf("%-38s %6d %6d %6d %6d %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
-               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+               gpu_ms, gpu_gflops, rel_err_str);
     }
 
 
     printf("------------------Float 16-----------------\n");
-    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("%-38s %6s %6s %6s %6s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
 
     for (const auto& s : shapes) {
