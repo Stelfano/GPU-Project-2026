@@ -1,7 +1,4 @@
 // main.cu
-// Driver principale: per ogni shape genera A e B, esegue il riferimento CPU
-// (dove previsto), esegue il kernel CUDA naive, confronta i risultati e
-// stampa una tabella riassuntiva con tempi e GFLOP/s.
 #include <cstdio>
 #include <vector>
 #include <typeinfo>
@@ -12,11 +9,11 @@
 #include "../include/cuda_gemm.cuh"
 
 int main() {
-    auto shapes = default_shapes();
+    auto shapes = large_shapes();
 
     printf("------------------  CuBlas FP32  -----------------\n");
-    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("%-38s %6s %6s %6s %6s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
 
     for (auto& s : shapes) {
@@ -39,7 +36,6 @@ int main() {
         cudaMalloc(&d_C, bytesC);
 
         cublasHandle_t handle;
-
         cublasStatus_t status = cublasCreate(&handle);
 
         if(status != CUBLAS_STATUS_SUCCESS){
@@ -62,7 +58,6 @@ int main() {
         double max_abs_err;
         double mean_rel_err;
 
-        char cpu_ms_str[32];
         char rel_err_str[32];
 
         stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
@@ -105,11 +100,8 @@ int main() {
         if(s.verify_cpu){
             cudaMemcpy(C_gpu.data(), d_C, s.M*s.N*s.Bsize*sizeof(float), cudaMemcpyDeviceToHost);
             compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
-            float cpu_ms = 0;
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
         }else{
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
             snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
         }
             
@@ -119,9 +111,9 @@ int main() {
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
 
 
-        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+        printf("%-38s %6d %6d %6d %6d %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
-               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+               gpu_ms, gpu_gflops, rel_err_str);
 
         cudaEventDestroy(start);
         cudaEventDestroy(stop);
@@ -133,8 +125,8 @@ int main() {
     
 
     printf("------------------FLOAT 32-----------------\n");
-    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("%-38s %6s %6s %6s %6s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
 
     for (const auto& s : shapes) {
@@ -143,30 +135,24 @@ int main() {
         generate_matrix<float>(B, s.K, s.N, s.Bsize,/*seed=*/5678, 1.0f);
 
         std::vector<float> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
-        double gpu_ms = 10;
-        //double gpu_ms = gemm_cuda_timed<float>(A.data(), B.data(), C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
+        double gpu_ms = gemm_cuda_timed<float, float, false, false>(A.data(), B.data(), C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
 
         double max_abs_err;
         double mean_rel_err;
 
-        char cpu_ms_str[32];
         char rel_err_str[32];
 
         if(s.verify_cpu){
             compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
-            
-            float cpu_ms = 0;
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
         }else{
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
             snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
         }
 
-        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+        printf("%-38s %6d %6d %6d %6d %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
-               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+                gpu_ms, gpu_gflops, rel_err_str);
     }
 
 
@@ -181,11 +167,9 @@ int main() {
         generate_matrix<__nv_bfloat16>(A, s.M, s.K, s.Bsize, /*seed=*/1234, 1.0f);
         generate_matrix<__nv_bfloat16>(B, s.K, s.N, s.Bsize,/*seed=*/5678, 1.0f);
 
-        std::vector<__nv_bfloat16> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
+        std::vector<float> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
 
-
-        //double gpu_ms = gemm_cuda_timed<__nv_bfloat16>(A.data(), B.data(), C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
-        double gpu_ms = 10;
+        double gpu_ms = gemm_cuda_timed<__nv_bfloat16, float, false, false>(A.data(), B.data(), C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
 
         double max_abs_err;
@@ -195,7 +179,7 @@ int main() {
         char rel_err_str[32];
 
         if(s.verify_cpu){
-            compare_matrices_frob<__nv_bfloat16>(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
+            compare_matrices_frob<float>(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
             float cpu_ms = 0;
             snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
@@ -221,38 +205,33 @@ int main() {
         generate_matrix<__half>(A, s.M, s.K, s.Bsize, /*seed=*/1234, 1.0f);
         generate_matrix<__half>(B, s.K, s.N, s.Bsize,/*seed=*/5678, 1.0f);
 
-        std::vector<__half> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
+        std::vector<float> C_gpu(static_cast<size_t>(s.M) * s.N * s.Bsize);
 
 
-        //double gpu_ms = gemm_cuda_timed<__half>(A.data(), B.data(), C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
-        double gpu_ms = 10;
+        double gpu_ms = gemm_cuda_timed<__half, float, false, false>(A.data(), B.data(), C_gpu.data(), s.M, s.N, s.K, s.Bsize, /*n_reps=*/10);
         double gpu_gflops = gflops(s.M, s.N, s.K, s.Bsize, gpu_ms);
 
        
         double max_abs_err;
         double mean_rel_err;
 
-        char cpu_ms_str[32];
         char rel_err_str[32];
 
         if(s.verify_cpu){
-            compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
-            float cpu_ms = 0;
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
+            compare_matrices_frob<float>(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
         }else{
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
             snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
         }
 
-        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+        printf("%-38s %6d %6d %6d %6d %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
-               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+               gpu_ms, gpu_gflops, rel_err_str);
     }
     
     printf("------------------  CuBlas FP16  -----------------\n");
-    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("%-38s %6s %6s %6s %6s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
 
     for (const auto& s : shapes) {
@@ -326,25 +305,21 @@ int main() {
         double max_abs_err;
         double mean_rel_err;
 
-        char cpu_ms_str[32];
         char rel_err_str[32];
 
         if(s.verify_cpu){
             std::vector<__half> C_gpu(s.M * s.N * s.Bsize);
             cudaMemcpy(C_gpu.data(), d_C, bytesC, cudaMemcpyDeviceToHost);
             compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
-            float cpu_ms = 0;
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
         }else{
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
             snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
         }
 
 
-        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+        printf("%-38s %6d %6d %6d %6d %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
-               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+               gpu_ms, gpu_gflops, rel_err_str);
 
         cudaEventDestroy(start);
         cudaEventDestroy(stop);
@@ -355,8 +330,8 @@ int main() {
     }
 
     printf("------------------  CuBlas BF16  -----------------\n");
-    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("%-38s %6s %6s %6s %6s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
 
     for (const auto& s : shapes) {
@@ -434,25 +409,21 @@ int main() {
         double max_abs_err;
         double mean_rel_err;
 
-        char cpu_ms_str[32];
         char rel_err_str[32];
 
         if(s.verify_cpu){
             std::vector<__nv_bfloat16> C_gpu(s.M * s.N * s.Bsize);
             cudaMemcpy(C_gpu.data(), d_C, bytesC, cudaMemcpyDeviceToHost);
             compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
-            float cpu_ms = 0;
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
         }else{
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
             snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
         }
 
 
-        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+        printf("%-38s %6d %6d %6d %6d %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
-               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+               gpu_ms, gpu_gflops, rel_err_str);
 
         cudaEventDestroy(start);
         cudaEventDestroy(stop);
@@ -464,8 +435,8 @@ int main() {
 
         
     printf("------------------BFLOAT 16 -- SharedMem+RegisterBlock 1D-----------------\n");
-    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("%-38s %6s %6s %6s %6s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
 
     for (const auto& s : shapes) {
@@ -484,29 +455,25 @@ int main() {
         double max_abs_err;
         double mean_rel_err;
 
-        char cpu_ms_str[32];
         char rel_err_str[32];
 
         if(s.verify_cpu){
             compare_matrices_frob<__nv_bfloat16>(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
-            float cpu_ms = 0;
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
         }else{
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
             snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
         }
 
 
-        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+        printf("%-38s %6d %6d %6d %6d %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
-               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+               gpu_ms, gpu_gflops, rel_err_str);
     }
 
 
     printf("------------------BFLOAT 16 -- SharedMem+RegisterBlock 2D -----------------\n");
-    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("%-38s %6s %6s %6s %6s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
 
     for (const auto& s : shapes) {
@@ -525,28 +492,24 @@ int main() {
         double max_abs_err;
         double mean_rel_err;
 
-        char cpu_ms_str[32];
         char rel_err_str[32];
 
         if(s.verify_cpu){
             compare_matrices_frob<__nv_bfloat16>(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
-            float cpu_ms = 0;
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
         }else{
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
             snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
         }
 
 
-        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+        printf("%-38s %6d %6d %6d %6d %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
-               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+               gpu_ms, gpu_gflops, rel_err_str);
     }
 
      printf("------------------FLOAT 16 -- Warptile kernel -----------------\n");
-    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("%-38s %6s %6s %6s %6s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B",  "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
 
     for (const auto& s : shapes) {
@@ -565,29 +528,25 @@ int main() {
         double max_abs_err;
         double mean_rel_err;
 
-        char cpu_ms_str[32];
         char rel_err_str[32];
 
         if(s.verify_cpu){
             compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
-            float cpu_ms = 0;
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
         }else{
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
             snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
         }
 
 
-        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+        printf("%-38s %6d %6d %6d %6d %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
-               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+               gpu_ms, gpu_gflops, rel_err_str);
     }
 
 
  printf("------------------FLOAT 16 / F32 Accumulation -- Tensor Core Basic -----------------\n");
-    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("%-38s %6s %6s %6s %6s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
 
     for (const auto& s : shapes) {
@@ -606,29 +565,25 @@ int main() {
         double max_abs_err;
         double mean_rel_err;
 
-        char cpu_ms_str[32];
         char rel_err_str[32];
 
         if(s.verify_cpu){
             compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
-            float cpu_ms = 0;
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
         }else{
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
             snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
         }
 
 
-        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+        printf("%-38s %6d %6d %6d %6d %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
-               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+               gpu_ms, gpu_gflops, rel_err_str);
     }
 
 
     printf("------------------FLOAT 16 / F32 Accumulation -- Tensor Core Advanced -----------------\n");
-    printf("%-38s %6s %6s %6s %6s %12s %12s %14s %12s\n",
-           "shape", "M", "N", "K", "B", "CPU(ms)", "GPU(ms)", "GPU GFLOP/s", "err.rel");
+    printf("%-38s %6s %6s %6s %6s %12s %14s %12s\n",
+           "shape", "M", "N", "K", "B", "GPU(ms)", "GPU GFLOP/s", "err.rel");
     printf("--------------------------------------------------------------------------------------------------------\n");
 
     for (const auto& s : shapes) {
@@ -647,28 +602,20 @@ int main() {
         double max_abs_err;
         double mean_rel_err;
 
-        char cpu_ms_str[32];
         char rel_err_str[32];
 
         if(s.verify_cpu){
             compare_matrices(s.reference, C_gpu.data(), C_gpu.size(), max_abs_err, mean_rel_err);
-            float cpu_ms = 0;
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "%.3f", cpu_ms);
             snprintf(rel_err_str, sizeof(rel_err_str), "%.2e", mean_rel_err);
         }else{
-            snprintf(cpu_ms_str, sizeof(cpu_ms_str), "skipped");
             snprintf(rel_err_str, sizeof(rel_err_str), "n/a");
         }
 
 
-        printf("%-38s %6d %6d %6d %6d %12s %12.3f %14.4f %12s\n",
+        printf("%-38s %6d %6d %6d %6d %12.3f %14.4f %12s\n",
                s.label.c_str(), s.M, s.N, s.K, s.Bsize,
-               cpu_ms_str, gpu_ms, gpu_gflops, rel_err_str);
+               gpu_ms, gpu_gflops, rel_err_str);
     }
-
-
-
-
 
 
     for(auto &s : shapes){

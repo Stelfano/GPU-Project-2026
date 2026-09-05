@@ -21,27 +21,17 @@ using namespace nvcuda;
 
 #define WARP_SIZE 32
 
-// Esegue C = A * B su GPU con un kernel naive (un thread per elemento di C,
-// nessuna shared memory, nessun register blocking — è deliberatamente il
-// punto di partenza più semplice possibile). Misura il tempo di solo kernel
-// con CUDA events, mediato su n_reps ripetizioni dopo un run di warm-up non
-// cronometrato. A, B, C sono puntatori host; la funzione gestisce da sola
-// malloc/copy/free su device. Ritorna i millisecondi medi per iterazione.
-
-template <typename T>
-__global__ void gemm_naive_kernel(const T* __restrict__ A,
-                                  const T* __restrict__ B,
-                                  T* __restrict__ C, 
-                                  int M, int N, int K, int Bsize) {
+template <typename T, typename Acc, bool Fusion, bool Epl>
+__global__ void gemm_naive_kernel(const T* __restrict__ A,const T* __restrict__ B, Acc* __restrict__ C, int M, int N, int K, int Bsize) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     int batch = blockIdx.z * blockDim.z + threadIdx.z;
 
     if (row < M && col < N && batch < Bsize) {
-        T acc = static_cast<T>(0.0f);
+        Acc acc = 0.0f;
         
         for (int k = 0; k < K; k++) {
-            acc += A[static_cast<size_t>(row) * K + k + batch*(M*K)] * B[static_cast<size_t>(k) * N + col + batch*(K*N)];
+            acc += (float)A[static_cast<size_t>(row) * K + k + batch*(M*K)] * (float)B[static_cast<size_t>(k) * N + col + batch*(K*N)];
         }
 
         C[static_cast<size_t>(row) * N + col + batch*(M*N)] = acc;
@@ -49,8 +39,8 @@ __global__ void gemm_naive_kernel(const T* __restrict__ A,
 }
 
 
-template <typename T>
-__global__ void naiveReLU(T *C, int M, int N, int Bsize){
+template <typename Acc>
+__global__ void naiveReLU(Acc *C, int M, int N, int Bsize){
 
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -58,21 +48,20 @@ __global__ void naiveReLU(T *C, int M, int N, int Bsize){
 
     if (row < M && col < N && batch < Bsize) {
         int pos = static_cast<size_t>(row) * N + col + batch*(M*N);
-        if(C[pos] < (T)0)
+        if(C[pos] < (Acc)0)
             C[pos] = 0; 
     }
 }
 
-template <typename T>
-double gemm_cuda_timed(const T* h_A, const T* h_B, T* h_C,
-                       int M, int N, int K, int Bsize, int n_reps) {
+template <typename T, typename Acc, bool Fusion, bool Epl>
+double gemm_cuda_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K, int Bsize, int n_reps) {
     
-    // Dimensione automatica basata sul tipo T passata alla funzione
     size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
     size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
-    size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(T);
+    size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(Acc);
 
-    T *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+    T *d_A = nullptr, *d_B = nullptr;
+    Acc *d_C = nullptr;
     CUDA_CHECK(cudaMalloc(&d_A, bytesA));
     CUDA_CHECK(cudaMalloc(&d_B, bytesB));
     CUDA_CHECK(cudaMalloc(&d_C, bytesC));
@@ -85,8 +74,8 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, T* h_C,
                  (M + blockDim.y - 1) / blockDim.y,
                  (Bsize + blockDim.z - 1) / blockDim.z);
 
-    // Warm-up: specifichiamo <T> al kernel
-    gemm_naive_kernel<T><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    
+    gemm_naive_kernel<T, Acc, Fusion, Epl><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -96,7 +85,7 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, T* h_C,
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
-        gemm_naive_kernel<T><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        gemm_naive_kernel<T, Acc, Fusion, Epl><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
         //naiveReLU<T><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
     }
     CUDA_CHECK(cudaEventRecord(stop));
@@ -119,10 +108,7 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, T* h_C,
 }
 
 template <typename T, int BM, int BN, int BK, int TM>
-__global__ void gemm_tiled_kernel(const T* __restrict__ A,
-                                   const T* __restrict__ B,
-                                   T* __restrict__ C,
-                                   int M, int N, int K, int Bsize) {
+__global__ void gemm_tiled_kernel(const T* __restrict__ A, const T* __restrict__ B, T* __restrict__ C, int M, int N, int K, int Bsize) {
     const int block_row = blockIdx.y * BM;
     const int block_col = blockIdx.x * BN;
     const int batch     = blockIdx.z;
@@ -130,11 +116,8 @@ __global__ void gemm_tiled_kernel(const T* __restrict__ A,
     __shared__ T As[BM * BK];
     __shared__ T Bs[BK * BN];
 
-    // Ogni thread possiede una colonna fissa (thread_col) e TM righe
-    // consecutive a partire da thread_row*TM: e' qui che si decide il
-    // register blocking.
     const int thread_col = threadIdx.x % BN;
-    const int thread_row = threadIdx.x / BN;   // 0 .. (BM/TM - 1)
+    const int thread_row = threadIdx.x / BN;  
 
     const T* A_batch = A + static_cast<size_t>(batch) * M * K;
     const T* B_batch = B + static_cast<size_t>(batch) * K * N;
@@ -144,9 +127,6 @@ __global__ void gemm_tiled_kernel(const T* __restrict__ A,
     const T* B_tile = B_batch + block_col;
     T*       C_tile = C_batch + static_cast<size_t>(block_row) * N + block_col;
 
-    // Caricamento cooperativo: ogni thread porta in shared memory
-    // esattamente un elemento di As e uno di Bs per iterazione
-    // (BM*BK e BK*BN sono entrambi multipli del numero di thread/blocco).
     const int inner_row_a = threadIdx.x / BK;
     const int inner_col_a = threadIdx.x % BK;
     const int inner_row_b = threadIdx.x / BN;
@@ -166,11 +146,11 @@ __global__ void gemm_tiled_kernel(const T* __restrict__ A,
 
         #pragma unroll
         for (int k = 0; k < BK; ++k) {
-            T b_val = Bs[k * BN + thread_col];   // un solo accesso a shared...
+            T b_val = Bs[k * BN + thread_col];   
             #pragma unroll
             for (int i = 0; i < TM; ++i) {
                 T a_val = As[(thread_row * TM + i) * BK + k];
-                acc[i] += a_val * b_val;          // ...riusato per TM MAC
+                acc[i] += a_val * b_val;          
             }
         }
         __syncthreads();
@@ -187,13 +167,6 @@ double gemm_tiled_timed(const T* h_A, const T* h_B, T* h_C,
                          int M, int N, int K, int Bsize, int n_reps = 10) {
     constexpr int BM = 64, BN = 64, BK = 8, TM = 8;
 
-    // Versione semplice: nessuna gestione dei bordi. M/N/K devono essere
-    // multipli di BM/BN/BK -- tutte le shape della consegna attuale lo sono.
-    if (M % BM != 0 || N % BN != 0 || K % BK != 0) {
-        fprintf(stderr, "gemm_tiled_timed: M/N/K devono essere multipli di %d/%d/%d\n", BM, BN, BK);
-        exit(EXIT_FAILURE);
-    }
-
     size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
     size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
     size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(T);
@@ -205,7 +178,7 @@ double gemm_tiled_timed(const T* h_A, const T* h_B, T* h_C,
     CUDA_CHECK(cudaMemcpy(d_A, h_A, bytesA, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_B, h_B, bytesB, cudaMemcpyHostToDevice));
 
-    dim3 blockDim((BM * BN) / TM);          // 512 thread, 1D
+    dim3 blockDim((BM * BN) / TM);          
     dim3 gridDim(N / BN, M / BM, Bsize);
 
     gemm_tiled_kernel<T, BM, BN, BK, TM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
@@ -325,13 +298,6 @@ template <typename T>
 double gemm_tiled_timed_2D(const T* h_A, const T* h_B, T* h_C,
                          int M, int N, int K, int Bsize, int n_reps = 10) {
     constexpr int BM = 64, BN = 64, BK = 8, TM = 8, TN = 8;
-
-    // Versione semplice: nessuna gestione dei bordi. M/N/K devono essere
-    // multipli di BM/BN/BK -- tutte le shape della consegna attuale lo sono.
-    if (M % BM != 0 || N % BN != 0 || K % BK != 0) {
-        fprintf(stderr, "gemm_tiled_timed: M/N/K devono essere multipli di %d/%d/%d\n", BM, BN, BK);
-        exit(EXIT_FAILURE);
-    }
 
     size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
     size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
@@ -485,13 +451,6 @@ double gemm_warptiled_timed(const T* h_A, const T* h_B, T* h_C,
                          int M, int N, int K, int Bsize, int n_reps = 10) {
     constexpr int BM = 64, BN = 64, BK = 8, TM = 4, TN = 4, WN = 32, WM = 64;
 
-    // Versione semplice: nessuna gestione dei bordi. M/N/K devono essere
-    // multipli di BM/BN/BK -- tutte le shape della consegna attuale lo sono.
-    if (M % BM != 0 || N % BN != 0 || K % BK != 0) {
-        fprintf(stderr, "gemm_tiled_timed: M/N/K devono essere multipli di %d/%d/%d\n", BM, BN, BK);
-        exit(EXIT_FAILURE);
-    }
-
     size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
     size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
     size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(T);
@@ -506,7 +465,7 @@ double gemm_warptiled_timed(const T* h_A, const T* h_B, T* h_C,
     const int WARPSIZE = 32;
     const int NUM_WARPS = (BM/WM) * (BN/WN);
     const int NUM_THREADS = NUM_WARPS * WARPSIZE;
-    dim3 blockDim(NUM_THREADS);          // 512 thread, 1D
+    dim3 blockDim(NUM_THREADS); 
     dim3 gridDim(N / BN, M / BM, Bsize);
 
     gemm_warptiled_kernel<T, BM, BN, BK, TM, TN, WN, WM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
@@ -706,17 +665,9 @@ double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
 
 template <typename T, typename Acc>
 __global__ void tiled_mma_kernel(T *A, T *B, Acc *C, int M, int N, int K, int Bsize) {
-    const int WMMA_M = 16;
-    const int WMMA_N = 16;
-    const int WMMA_K = 16;
-
     const int BLKSIZE = 128;
     const int SMEM_PAD = 8;
     int numThreads = 256;
-
-    int lda = K;
-    int ldb = N;
-    int ldc = N;
 
     const int strideA = numThreads / BLKSIZE;
     const int innerRowA = threadIdx.x / BLKSIZE;
@@ -727,20 +678,16 @@ __global__ void tiled_mma_kernel(T *A, T *B, Acc *C, int M, int N, int K, int Bs
     const int innerColB = threadIdx.x % BLKSIZE;
 
     int warp_id = threadIdx.x / WARP_SIZE;
-    const int warp_row = warp_id / 4; // 0 oppure 1
-    const int warp_col = warp_id % 4; // 0, 1, 2, oppure 3
+    const int warp_row = warp_id / 4; 
+    const int warp_col = warp_id % 4; 
 
     const int block_row = blockIdx.y * BLKSIZE;
     const int block_col = blockIdx.x * BLKSIZE;
     const int batch     = blockIdx.z;
 
-    constexpr int WARPSIZE = 32;
-    constexpr int subtileM = 64;
-    constexpr int subtileN = 32;
     const int warp_m_offset = warp_row * 64;
     const int warp_n_offset = warp_col * 32;
 
-    //Thread in the subtile
     const T* A_batch = A + static_cast<size_t>(batch) * M * K;
     const T* B_batch = B + static_cast<size_t>(batch) * K * N;
     Acc*       C_batch = C + static_cast<size_t>(batch) * M * N;
@@ -752,11 +699,7 @@ __global__ void tiled_mma_kernel(T *A, T *B, Acc *C, int M, int N, int K, int Bs
     __shared__ T As[BLKSIZE*(BLKSIZE+SMEM_PAD)];
     __shared__ T Bs[BLKSIZE*(BLKSIZE+SMEM_PAD)];
     const int SMEM_LD = BLKSIZE + SMEM_PAD;
-    int tiles = BLKSIZE / WMMA_K;
 
-    // 1. Accumulatori nei registri: dichiarati e azzerati UNA SOLA VOLTA,
-    //    prima del loop su K, cosi' il risultato si accumula su tutte le
-    //    iterazioni di block-K invece di essere perso ad ogni tile.
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag[4][2];
     #pragma unroll
     for (int i = 0; i < 4; i++) {
@@ -766,7 +709,6 @@ __global__ void tiled_mma_kernel(T *A, T *B, Acc *C, int M, int N, int K, int Bs
         }
     }
 
-    // Loop over the K-dimension
     for (int k0 = 0; k0 < K; k0 += BLKSIZE) {
         #pragma unroll
         for (uint loadOffset = 0; loadOffset < BLKSIZE; loadOffset += strideA) {
@@ -783,20 +725,16 @@ __global__ void tiled_mma_kernel(T *A, T *B, Acc *C, int M, int N, int K, int Bs
         A_tile += BLKSIZE;
         B_tile += static_cast<size_t>(BLKSIZE) * N;
 
-        // 2. Loop principale lungo K (passi da 16)
-        // Frammenti temporanei per lo step corrente di K
         for (int k_step = 0; k_step < BLKSIZE; k_step += 16) {
             wmma::fragment<wmma::matrix_a, 16, 16, 16, T, wmma::row_major> a_frag[4];
             wmma::fragment<wmma::matrix_b, 16, 16, 16, T, wmma::row_major> b_frag[2];
 
-            // Caricamento dei 4 frammenti di A lungo le righe assegnate al warp
             #pragma unroll
             for (int i = 0; i < 4; i++) {
                 int row_a = warp_m_offset + (i * 16);
                 wmma::load_matrix_sync(a_frag[i], &As[row_a * SMEM_LD + k_step], SMEM_LD);
             }
 
-            // Caricamento dei 2 frammenti di B lungo le colonne assegnate al warp
             #pragma unroll
             for (int j = 0; j < 2; j++) {
                 int col_b = warp_n_offset + (j * 16);
@@ -812,15 +750,9 @@ __global__ void tiled_mma_kernel(T *A, T *B, Acc *C, int M, int N, int K, int Bs
             }
         }
 
-        // 3. Sync di chiusura: necessario prima che l'iterazione successiva
-        //    del loop su k0 sovrascriva As/Bs. Senza questo sync alcuni warp
-        //    potrebbero ancora leggere i dati correnti (usati sopra nel
-        //    load_matrix_sync/mma_sync) mentre altri warp gia' li sovrascrivono.
         __syncthreads();
     }
 
-    // 4. Store finale: eseguito UNA SOLA VOLTA dopo aver accumulato il
-    //    contributo di tutti i tile K, non ad ogni iterazione.
     #pragma unroll
     for (int i = 0; i < 4; i++) {
         #pragma unroll
@@ -828,7 +760,6 @@ __global__ void tiled_mma_kernel(T *A, T *B, Acc *C, int M, int N, int K, int Bs
             int global_r = block_row + warp_m_offset + (i * 16);
             int global_c = block_col + warp_n_offset + (j * 16);
 
-            // Controllo dei bordi della matrice globale
             if (global_r < M && global_c < N) {
                 wmma::store_matrix_sync(
                     &C_batch[global_r * N + global_c],
@@ -868,7 +799,6 @@ double gemm_tensor_staged_timed(const T* h_A, const T* h_B, Acc* h_C,
     cudaFuncAttributeMaxDynamicSharedMemorySize, 
     64 * 1024
     );
-    // Warmup (Passando req_smem come 3° parametro di launch)
     tiled_mma_kernel<__half, float><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
