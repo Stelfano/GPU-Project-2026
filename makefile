@@ -1,12 +1,11 @@
 CC=nvcc
-
 ARCH=sm_80
-
-LIB_FLAGS=-lm -O3 -arch=$(ARCH) -lcublas 
+LIB_FLAGS=-lm -O3 -MD -arch=$(ARCH) -lcublas 
 
 BIN_FOLDER := bin
 OBJ_FOLDER := obj
 SRC_FOLDER := src
+INC_DIR := include
 BATCH_OUT_FOLDER := outputs
 
 MAIN_NAME=main
@@ -19,17 +18,17 @@ OBJECTS = $(OBJ_FOLDER)/cpu_gemm.o $(OBJ_FOLDER)/cuda_gemm.o
 
 all: $(BIN_FOLDER)/$(CPU_BIN) $(BIN_FOLDER)/$(MAIN_BIN)
 
-$(OBJ_FOLDER)/cpu_gemm.o: $(SRC_FOLDER)/cpu_gemm.cpp
+$(OBJ_FOLDER)/cpu_gemm.o: $(SRC_FOLDER)/cpu_gemm.cpp $(INC_DIR)/cpu_gemm.h
 	@mkdir -p $(BIN_FOLDER) $(OBJ_FOLDER) $(BATCH_OUT_FOLDER)
 	$(CC) -c $(SRC_FOLDER)/cpu_gemm.cpp -o $@ $(LIB_FLAGS)
 
 
-$(OBJ_FOLDER)/cuda_gemm.o: $(SRC_FOLDER)/cuda_gemm.cu
+$(OBJ_FOLDER)/cuda_gemm.o: $(SRC_FOLDER)/cuda_gemm.cu $(INC_DIR)/cuda_gemm.cuh
 	@mkdir -p $(BIN_FOLDER) $(OBJ_FOLDER) $(BATCH_OUT_FOLDER)
 	$(CC) -c $(SRC_FOLDER)/cuda_gemm.cu -o $@ $(LIB_FLAGS)
 
 
-$(BIN_FOLDER)/$(MAIN_BIN): $(SRC_FOLDER)/$(MAIN_SRC) $(OBJECTS)
+$(BIN_FOLDER)/$(MAIN_BIN): $(SRC_FOLDER)/$(MAIN_SRC) $(OBJECTS) 
 	mkdir -p $(BIN_FOLDER)
 	$(CC) $^ -o $@ $(LIB_FLAGS)
 
@@ -40,5 +39,5 @@ $(BIN_FOLDER)/$(CPU_BIN): $(SRC_FOLDER)/test_cpu_only.cpp $(OBJECTS)
 clean:
 	rm -rf $(BIN_FOLDER) $(OBJ_FOLDER) $(BATCH_OUT_FOLDER)
 
-
+-include $(OBJECTS:.o=.d)
                                                                                                                                                                                 
