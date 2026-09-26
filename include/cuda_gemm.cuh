@@ -44,8 +44,7 @@ __global__ void gemm_naive_kernel(const T* __restrict__ A,const T* __restrict__ 
 
 template <typename T, typename Acc>
 __global__ void gemm_splitk_atomic_kernel(
-    const T* __restrict__ A, const T* __restrict__ B, Acc* __restrict__ C, int M, int N, int K, int Bsize, int SplitK)
-{
+    const T* __restrict__ A, const T* __restrict__ B, Acc* __restrict__ C, int M, int N, int K, int Bsize, int SplitK){
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -77,9 +76,8 @@ __global__ void naiveReLU(Acc *C, int M, int N, int Bsize){
     int batch = blockIdx.z * blockDim.z + threadIdx.z;
 
     if (row < M && col < N && batch < Bsize) {
-        int pos = static_cast<size_t>(row) * N + col + batch*(M*N);
-        if(C[pos] < (Acc)0)
-            C[pos] = 0; 
+        size_t pos = static_cast<size_t>(row) * N + col + static_cast<size_t>(batch)*(M*N);
+        C[pos] = max((float)0, (float)C[pos]);
     }
 }
 
@@ -107,7 +105,7 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K
 
     
     if constexpr (Epl){
-        gemm_naive_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        gemm_naive_kernel<T, Acc, false, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
         naiveReLU<Acc><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
     }else{
         gemm_naive_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
@@ -157,8 +155,8 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K
 
 }
 
-template <typename T, int BM, int BN, int BK, int TM>
-__global__ void gemm_tiled_kernel(const T* __restrict__ A, const T* __restrict__ B, T* __restrict__ C, int M, int N, int K, int Bsize) {
+template <typename T, typename Acc, bool Fusion, bool Epl, int BM, int BN, int BK, int TM>
+__global__ void gemm_tiled_kernel(const T* __restrict__ A, const T* __restrict__ B, Acc* __restrict__ C, int M, int N, int K, int Bsize) {
     const int block_row = blockIdx.y * BM;
     const int block_col = blockIdx.x * BN;
     const int batch     = blockIdx.z;
@@ -171,18 +169,18 @@ __global__ void gemm_tiled_kernel(const T* __restrict__ A, const T* __restrict__
 
     const T* A_batch = A + static_cast<size_t>(batch) * M * K;
     const T* B_batch = B + static_cast<size_t>(batch) * K * N;
-    T*       C_batch = C + static_cast<size_t>(batch) * M * N;
+    Acc*       C_batch = C + static_cast<size_t>(batch) * M * N;
 
     const T* A_tile = A_batch + static_cast<size_t>(block_row) * K;
     const T* B_tile = B_batch + block_col;
-    T*       C_tile = C_batch + static_cast<size_t>(block_row) * N + block_col;
+    Acc*       C_tile = C_batch + static_cast<size_t>(block_row) * N + block_col;
 
     const int inner_row_a = threadIdx.x / BK;
     const int inner_col_a = threadIdx.x % BK;
     const int inner_row_b = threadIdx.x / BN;
     const int inner_col_b = threadIdx.x % BN;
 
-    T acc[TM];
+    Acc acc[TM];
     #pragma unroll
     for (int i = 0; i < TM; ++i) acc[i] = static_cast<T>(0.0f);
 
@@ -200,7 +198,7 @@ __global__ void gemm_tiled_kernel(const T* __restrict__ A, const T* __restrict__
             #pragma unroll
             for (int i = 0; i < TM; ++i) {
                 T a_val = As[(thread_row * TM + i) * BK + k];
-                acc[i] += a_val * b_val;          
+                acc[i] += (Acc)a_val * (Acc)b_val;          
             }
         }
         __syncthreads();
@@ -208,20 +206,23 @@ __global__ void gemm_tiled_kernel(const T* __restrict__ A, const T* __restrict__
 
     #pragma unroll
     for (int i = 0; i < TM; ++i) {
+    if constexpr(Fusion)
+        C_tile[static_cast<size_t>(thread_row * TM + i) * N + thread_col] = max((Acc)0, (Acc)acc[i]);
+    else
         C_tile[static_cast<size_t>(thread_row * TM + i) * N + thread_col] = acc[i];
     }
 }
 
-template <typename T>
-double gemm_tiled_timed(const T* h_A, const T* h_B, T* h_C,
-                         int M, int N, int K, int Bsize, int n_reps = 10) {
+template <typename T, typename Acc, bool Fusion, bool Epl>
+double gemm_tiled_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K, int Bsize, int n_reps = 10) {
     constexpr int BM = 64, BN = 64, BK = 8, TM = 8;
 
     size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
     size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
-    size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(T);
+    size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(Acc);
 
-    T *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+    T *d_A = nullptr, *d_B = nullptr;
+    Acc *d_C = nullptr;
     CUDA_CHECK(cudaMalloc(&d_A, bytesA));
     CUDA_CHECK(cudaMalloc(&d_B, bytesB));
     CUDA_CHECK(cudaMalloc(&d_C, bytesC));
@@ -231,7 +232,16 @@ double gemm_tiled_timed(const T* h_A, const T* h_B, T* h_C,
     dim3 blockDim((BM * BN) / TM);          
     dim3 gridDim(N / BN, M / BM, Bsize);
 
-    gemm_tiled_kernel<T, BM, BN, BK, TM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    if constexpr(Epl){
+        gemm_tiled_kernel<T, Acc, false, false, BM, BN, BK, TM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        dim3 blockDim(16, 16, 1);
+        dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
+                 (M + blockDim.y - 1) / blockDim.y,
+                 (Bsize + blockDim.z - 1) / blockDim.z);
+        naiveReLU<Acc><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+    }else{
+        gemm_tiled_kernel<T, Acc, Fusion, false, BM, BN, BK, TM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    }
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -241,7 +251,16 @@ double gemm_tiled_timed(const T* h_A, const T* h_B, T* h_C,
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
-        gemm_tiled_kernel<T, BM, BN, BK, TM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        if constexpr(Epl){
+            gemm_tiled_kernel<T, Acc, false, false, BM, BN, BK, TM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+            dim3 blockDim(16, 16, 1);
+            dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
+                 (M + blockDim.y - 1) / blockDim.y,
+                 (Bsize + blockDim.z - 1) / blockDim.z);
+            naiveReLU<Acc><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+        }else{
+            gemm_tiled_kernel<T, Acc, Fusion, false, BM, BN, BK, TM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        }
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
@@ -262,11 +281,8 @@ double gemm_tiled_timed(const T* h_A, const T* h_B, T* h_C,
 }
 
 
-template <typename T, int BM, int BN, int BK, int TM, int TN>
-__global__ void gemm_tiled_kernel_2D(const T* __restrict__ A,
-                                   const T* __restrict__ B,
-                                   T* __restrict__ C,
-                                   int M, int N, int K, int Bsize) {
+template <typename T, typename Acc, bool Fusion, bool Epl, int BM, int BN, int BK, int TM, int TN>
+__global__ void gemm_tiled_kernel_2D(const T* __restrict__ A, const T* __restrict__ B, Acc* __restrict__ C, int M, int N, int K, int Bsize) {
     const int block_row = blockIdx.y * BM;
     const int block_col = blockIdx.x * BN;
     const int batch     = blockIdx.z;
@@ -279,11 +295,11 @@ __global__ void gemm_tiled_kernel_2D(const T* __restrict__ A,
 
     const T* A_batch = A + static_cast<size_t>(batch) * M * K;
     const T* B_batch = B + static_cast<size_t>(batch) * K * N;
-    T*       C_batch = C + static_cast<size_t>(batch) * M * N;
+    Acc*       C_batch = C + static_cast<size_t>(batch) * M * N;
 
     const T* A_tile = A_batch + static_cast<size_t>(block_row) * K;
     const T* B_tile = B_batch + block_col;
-    T*       C_tile = C_batch + static_cast<size_t>(block_row) * N + block_col;
+    Acc*       C_tile = C_batch + static_cast<size_t>(block_row) * N + block_col;
     int numThreads = (BM/TM) * (BN/TN);
 
     const int strideA = numThreads / BK;
@@ -296,7 +312,7 @@ __global__ void gemm_tiled_kernel_2D(const T* __restrict__ A,
 
     T a_val[TM] = {0.0};
     T b_val[TN] = {0.0};
-    T thread_results[TM * TN] = {0.0};
+    Acc thread_results[TM * TN] = {0.0};
 
 
     for (int k0 = 0; k0 < K; k0 += BK) {
@@ -313,7 +329,6 @@ __global__ void gemm_tiled_kernel_2D(const T* __restrict__ A,
         A_tile += BK;
         B_tile += static_cast<size_t>(BK) * N;
 
-
         #pragma unroll
         for (int k = 0; k < BK; ++k) {
             T a_val[TM] = {0.0};
@@ -328,7 +343,7 @@ __global__ void gemm_tiled_kernel_2D(const T* __restrict__ A,
 
             for(int i = 0;i < TM;i++){
                 for(int j = 0;j < TN; j++){
-                    thread_results[i * TN + j] += a_val[i] * b_val[j];
+                    thread_results[i * TN + j] += (Acc)a_val[i] * (Acc)b_val[j];
                 }
             }
         }
@@ -338,32 +353,44 @@ __global__ void gemm_tiled_kernel_2D(const T* __restrict__ A,
     #pragma unroll
     for (int i = 0; i < TM; ++i) {
         for(int j = 0; j < TN; j++)
-            C_tile[static_cast<size_t>(thread_row * TM + i) * N + (thread_col * TN + j)] = thread_results[i * TN + j]; 
+            if constexpr (Fusion)
+                C_tile[static_cast<size_t>(thread_row * TM + i) * N + (thread_col * TN + j)] = max((Acc)0, (Acc)thread_results[i * TN + j]);
+            else
+                C_tile[static_cast<size_t>(thread_row * TM + i) * N + (thread_col * TN + j)] = thread_results[i * TN + j]; 
     }
 }
 
 
 
-template <typename T>
-double gemm_tiled_timed_2D(const T* h_A, const T* h_B, T* h_C,
-                         int M, int N, int K, int Bsize, int n_reps = 10) {
+template <typename T, typename Acc, bool Fusion, bool Epl>
+double gemm_tiled_timed_2D(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K, int Bsize, int n_reps = 10) {
     constexpr int BM = 64, BN = 64, BK = 8, TM = 8, TN = 8;
 
     size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
     size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
-    size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(T);
+    size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(Acc);
 
-    T *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+    T *d_A = nullptr, *d_B = nullptr;
+    Acc *d_C = nullptr;
     CUDA_CHECK(cudaMalloc(&d_A, bytesA));
     CUDA_CHECK(cudaMalloc(&d_B, bytesB));
     CUDA_CHECK(cudaMalloc(&d_C, bytesC));
     CUDA_CHECK(cudaMemcpy(d_A, h_A, bytesA, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_B, h_B, bytesB, cudaMemcpyHostToDevice));
 
-    dim3 blockDim((BM / TM) * (BN / TN));          // 512 thread, 1D
+    dim3 blockDim((BM / TM) * (BN / TN));          
     dim3 gridDim(N / BN, M / BM, Bsize);
 
-    gemm_tiled_kernel_2D<T, BM, BN, BK, TM, TN><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    if constexpr(Epl){
+        gemm_tiled_kernel_2D<T, Acc, false, false, BM, BN, BK, TM, TN><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        dim3 blockDim(16, 16, 1);
+        dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
+            (M + blockDim.y - 1) / blockDim.y,
+            (Bsize + blockDim.z - 1) / blockDim.z);
+        naiveReLU<Acc><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+    }else{
+        gemm_tiled_kernel_2D<T, Acc, Fusion, false, BM, BN, BK, TM, TN><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    }
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -373,7 +400,20 @@ double gemm_tiled_timed_2D(const T* h_A, const T* h_B, T* h_C,
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
-        gemm_tiled_kernel_2D<T, BM, BN, BK, TM, TN><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        if constexpr(Epl){
+            {
+            dim3 blockDim((BM / TM) * (BN / TN));          
+            dim3 gridDim(N / BN, M / BM, Bsize);
+            gemm_tiled_kernel_2D<T, Acc, false, false, BM, BN, BK, TM, TN><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+            }
+            dim3 blockDim(16, 16, 1);
+            dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
+                (M + blockDim.y - 1) / blockDim.y,
+                (Bsize + blockDim.z - 1) / blockDim.z);
+            naiveReLU<Acc><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+        }else{
+            gemm_tiled_kernel_2D<T, Acc, Fusion, false, BM, BN, BK, TM, TN><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        }
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
@@ -393,11 +433,8 @@ double gemm_tiled_timed_2D(const T* h_A, const T* h_B, T* h_C,
     return ms_avg;
 }
 
-template <typename T, int BM, int BN, int BK, int TM, int TN, int WN, int WM>
-__global__ void gemm_warptiled_kernel(const T* __restrict__ A,
-                                   const T* __restrict__ B,
-                                   T* __restrict__ C,
-                                   int M, int N, int K, int Bsize) {
+template <typename T, typename Acc, bool Fusion, bool Epl, int BM, int BN, int BK, int TM, int TN, int WN, int WM>
+__global__ void gemm_warptiled_kernel(const T* __restrict__ A, const T* __restrict__ B, Acc* __restrict__ C, int M, int N, int K, int Bsize) {
     const int block_row = blockIdx.y * BM;
     const int block_col = blockIdx.x * BN;
     const int batch     = blockIdx.z;
@@ -423,11 +460,11 @@ __global__ void gemm_warptiled_kernel(const T* __restrict__ A,
 
     const T* A_batch = A + static_cast<size_t>(batch) * M * K;
     const T* B_batch = B + static_cast<size_t>(batch) * K * N;
-    T*       C_batch = C + static_cast<size_t>(batch) * M * N;
+    Acc*       C_batch = C + static_cast<size_t>(batch) * M * N;
 
     const T* A_tile = A_batch + static_cast<size_t>(block_row) * K;
     const T* B_tile = B_batch + block_col;
-    T*       C_tile = C_batch + static_cast<size_t>(block_row) * N + block_col;
+    Acc*       C_tile = C_batch + static_cast<size_t>(block_row) * N + block_col;
     int numThreads = (BM/WM)*(BN/WN)*WARPSIZE;
 
     const int strideA = numThreads / BK;
@@ -487,25 +524,32 @@ __global__ void gemm_warptiled_kernel(const T* __restrict__ A,
         for(int subCol = 0;subCol < WNITER; ++subCol){
             for(int i = 0; i < TM; ++i){
                 for(int j = 0; j < TN; j++){
-                    C_tile[(warpRow * WM + subRow * WSUBM + threadRowWarp * TM + i) * N
-                       + (warpCol * WN + subCol * WSUBN + threadColWarp * TN + j)]
+                    if constexpr(Fusion){
+                        C_tile[(warpRow * WM + subRow * WSUBM + threadRowWarp * TM + i) * N
+                        + (warpCol * WN + subCol * WSUBN + threadColWarp * TN + j)]
+                            = max((Acc)0, (Acc)thread_results[(subRow * TM + i) * (WNITER * TN) + (subCol * TN) + j]);
+                    }else{
+                        C_tile[(warpRow * WM + subRow * WSUBM + threadRowWarp * TM + i) * N
+                        + (warpCol * WN + subCol * WSUBN + threadColWarp * TN + j)]
                         = thread_results[(subRow * TM + i) * (WNITER * TN) + (subCol * TN) + j];
+ 
+                    }
                 }
             }
         }
     }
 }
 
-template <typename T>
-double gemm_warptiled_timed(const T* h_A, const T* h_B, T* h_C,
-                         int M, int N, int K, int Bsize, int n_reps = 10) {
+template <typename T, typename Acc, bool Fusion, bool Epl>
+double gemm_warptiled_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K, int Bsize, int n_reps = 10) {
     constexpr int BM = 64, BN = 64, BK = 8, TM = 4, TN = 4, WN = 32, WM = 64;
 
     size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
     size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
-    size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(T);
+    size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(Acc);
 
-    T *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+    T *d_A = nullptr, *d_B = nullptr;
+    Acc *d_C = nullptr;
     CUDA_CHECK(cudaMalloc(&d_A, bytesA));
     CUDA_CHECK(cudaMalloc(&d_B, bytesB));
     CUDA_CHECK(cudaMalloc(&d_C, bytesC));
@@ -518,7 +562,16 @@ double gemm_warptiled_timed(const T* h_A, const T* h_B, T* h_C,
     dim3 blockDim(NUM_THREADS); 
     dim3 gridDim(N / BN, M / BM, Bsize);
 
-    gemm_warptiled_kernel<T, BM, BN, BK, TM, TN, WN, WM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    if constexpr(Epl){
+        gemm_warptiled_kernel<T, Acc, false, false, BM, BN, BK, TM, TN, WN, WM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        dim3 blockDim(16, 16, 1);
+        dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
+            (M + blockDim.y - 1) / blockDim.y,
+            (Bsize + blockDim.z - 1) / blockDim.z);
+        naiveReLU<Acc><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+    }else{
+        gemm_warptiled_kernel<T, Acc, Fusion, false, BM, BN, BK, TM, TN, WN, WM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    }
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -528,7 +581,20 @@ double gemm_warptiled_timed(const T* h_A, const T* h_B, T* h_C,
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
-        gemm_warptiled_kernel<T, BM, BN, BK, TM, TN, WN, WM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        if constexpr (Epl){
+            {
+            dim3 blockDim(NUM_THREADS); 
+            dim3 gridDim(N / BN, M / BM, Bsize);
+            gemm_warptiled_kernel<T, Acc, false, false, BM, BN, BK, TM, TN, WN, WM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+            }
+            dim3 blockDim(16, 16, 1);
+            dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
+                (M + blockDim.y - 1) / blockDim.y,
+                (Bsize + blockDim.z - 1) / blockDim.z);
+            naiveReLU<Acc><<<gridDim, blockDim>>>(d_C, M, N, Bsize);           
+        }else{
+            gemm_warptiled_kernel<T, Acc, Fusion, false, BM, BN, BK, TM, TN, WN, WM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        }
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
@@ -549,65 +615,7 @@ double gemm_warptiled_timed(const T* h_A, const T* h_B, T* h_C,
 }
 
 
-template <typename T, typename Acc>
-__global__ void mma_kernel(T *a, T *b, Acc *c, int M, int N, int K, int Bsize) {
-   // The only dimensions currently supported by WMMA
-    const int WMMA_M = 16;
-    const int WMMA_N = 16;
-    const int WMMA_K = 16;
- 
-    // Leading dimensions. Packed with no transpositions.
-    int lda = K;
-    int ldb = N;
-    int ldc = N;
-     
-    // Tile using a 2D grid
-    int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
-    int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
-
-    wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> a_frag;
-    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> b_frag;
-    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, Acc> acc_frag;
-    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, Acc> c_frag;
-    wmma::fill_fragment(acc_frag, 0.0f);
-
-        // Loop over the K-dimension
-    for (int i = 0; i < K; i += WMMA_K) {
-        int aRow = warpM * WMMA_M;
-        int aCol = i;
-        int bRow = i;
-        int bCol = warpN * WMMA_N;
-        
-        // Bounds checking
-        if (aRow < M && aCol < K && bRow < K && bCol < N) {
-            // Load the inputs
-            wmma::load_matrix_sync(a_frag, a + aRow + aCol * lda, lda);
-            wmma::load_matrix_sync(b_frag, b + bRow + bCol * ldb, ldb);
-    
-            // Perform the matrix multiplication
-            wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-        }
-    }
-
-        // Load in current value of c, scale by beta, and add to result scaled by alpha
-    int cRow = warpM * WMMA_M;
-    int cCol = warpN * WMMA_N;
-    
-    if (cRow < M && cCol < N) {
-        wmma::load_matrix_sync(c_frag, c + cRow + cCol * ldc, ldc, wmma::mem_row_major);
-        
-        //Add ReLU here
-        for(int i=0; i < c_frag.num_elements; i++) {
-            c_frag.x[i] = acc_frag.x[i] + c_frag.x[i];
-        }
-
-            // Store the output
-        wmma::store_matrix_sync(c + cRow + cCol * ldc, c_frag, ldc, wmma::mem_row_major);
-    }
-}
-
-
-template <typename T, typename Acc>
+template <typename T, typename Acc, bool Fusion, bool Epl>
 __global__ void batched_mma_kernel(T *a, T *b, Acc *c, int M, int N, int K, int Bsize) {
     const int WMMA_M = 16;
     const int WMMA_N = 16;
@@ -624,7 +632,6 @@ __global__ void batched_mma_kernel(T *a, T *b, Acc *c, int M, int N, int K, int 
     wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> b_frag;
     wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, Acc> acc_frag;
 
-        // Loop over the K-dimension
     for(int batch = 0; batch < Bsize; batch++){
         wmma::fill_fragment(acc_frag, 0.0f);
         int cBatch = batch * M * N;
@@ -650,17 +657,24 @@ __global__ void batched_mma_kernel(T *a, T *b, Acc *c, int M, int N, int K, int 
         }
 
         if (cRow < M && cCol < N) {
-            wmma::store_matrix_sync(c + cBatch + cRow * ldc + cCol, acc_frag, ldc, wmma::mem_row_major);
+            if constexpr (Fusion){
+                #pragma unroll
+                for(int i = 0;i < acc_frag.num_elements;i++){
+                    acc_frag.x[i] = max((Acc)0, acc_frag.x[i]);
+                }
+                wmma::store_matrix_sync(c + cBatch + cRow * ldc + cCol, acc_frag, ldc, wmma::mem_row_major);
+            }else{
+                wmma::store_matrix_sync(c + cBatch + cRow * ldc + cCol, acc_frag, ldc, wmma::mem_row_major);
+            }
         }
     }
 }
 
 
-template <typename T, typename Acc>
+template <typename T, typename Acc, bool Fusion, bool Epl>
 double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
                        int M, int N, int K, int Bsize, int n_reps) {
     
-    // Dimensione automatica basata sul tipo T passata alla funzione
     size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
     size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
     size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(Acc);
@@ -681,8 +695,16 @@ double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
     gridDim.y = (N + (BLKSIZE * blockDim.y) - 1) / (BLKSIZE * blockDim.y);
     gridDim.z = 1;
 
-    //warm-up
-    batched_mma_kernel<T, float><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    if constexpr (Epl){
+        batched_mma_kernel<T, Acc, false, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        dim3 blockDim(16, 16, 1);
+        dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
+            (M + blockDim.y - 1) / blockDim.y,
+            (Bsize + blockDim.z - 1) / blockDim.z);
+        naiveReLU<Acc><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+    }else{
+       batched_mma_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    }
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -692,7 +714,23 @@ double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
-        batched_mma_kernel<T, float><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        if constexpr (Epl){
+            {
+            dim3 blockDim(128, 4);
+            dim3 gridDim;
+            gridDim.x = (M + (BLKSIZE * blockDim.x / 32 - 1)) / (BLKSIZE * blockDim.x / 32);
+            gridDim.y = (N + (BLKSIZE * blockDim.y) - 1) / (BLKSIZE * blockDim.y);
+            gridDim.z = 1;
+            batched_mma_kernel<T, Acc, false, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+            }
+            dim3 blockDim(16, 16, 1);
+            dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
+            (M + blockDim.y - 1) / blockDim.y,
+            (Bsize + blockDim.z - 1) / blockDim.z);
+            naiveReLU<Acc><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+        }else{
+        batched_mma_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        }
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
@@ -713,7 +751,7 @@ double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
 }
 
 
-template <typename T, typename Acc>
+template <typename T, typename Acc, bool Fusion, bool Epl>
 __global__ void tiled_mma_kernel(T *A, T *B, Acc *C, int M, int N, int K, int Bsize) {
     const int BLKSIZE = 128;
     const int SMEM_PAD = 8;
@@ -796,10 +834,10 @@ __global__ void tiled_mma_kernel(T *A, T *B, Acc *C, int M, int N, int K, int Bs
                 #pragma unroll
                 for (int j = 0; j < 2; j++) {
                     wmma::mma_sync(c_frag[i][j], a_frag[i], b_frag[j], c_frag[i][j]);
+                    
                 }
             }
         }
-
         __syncthreads();
     }
 
@@ -809,6 +847,13 @@ __global__ void tiled_mma_kernel(T *A, T *B, Acc *C, int M, int N, int K, int Bs
         for (int j = 0; j < 2; j++) {
             int global_r = block_row + warp_m_offset + (i * 16);
             int global_c = block_col + warp_n_offset + (j * 16);
+
+            if constexpr(Fusion){
+                    for(int h = 0; h < c_frag[i][j].num_elements; h++){
+                        c_frag[i][j].x[h] = max((Acc)0, c_frag[i][j].x[h]);
+                }
+            }
+
 
             if (global_r < M && global_c < N) {
                 wmma::store_matrix_sync(
@@ -824,7 +869,7 @@ __global__ void tiled_mma_kernel(T *A, T *B, Acc *C, int M, int N, int K, int Bs
 
 
 
-template <typename T, typename Acc>
+template <typename T, typename Acc, bool Fusion, bool Epl>
 double gemm_tensor_staged_timed(const T* h_A, const T* h_B, Acc* h_C,
                        int M, int N, int K, int Bsize, int n_reps) {
     size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
@@ -845,11 +890,19 @@ double gemm_tensor_staged_timed(const T* h_A, const T* h_B, Acc* h_C,
     dim3 gridDim((N + BLKSIZE - 1) / BLKSIZE, (M + BLKSIZE - 1) / BLKSIZE, Bsize);
 
     cudaFuncSetAttribute(
-    tiled_mma_kernel<__half, float>, 
-    cudaFuncAttributeMaxDynamicSharedMemorySize, 
-    64 * 1024
+        tiled_mma_kernel<T, Acc, Fusion, Epl>, cudaFuncAttributeMaxDynamicSharedMemorySize, 64 * 1024
     );
-    tiled_mma_kernel<__half, float><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+
+    if constexpr (Epl){
+        tiled_mma_kernel<T, Acc, Fusion, Epl><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        dim3 blockDim(16, 16, 1);
+        dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
+            (M + blockDim.y - 1) / blockDim.y,
+            (Bsize + blockDim.z - 1) / blockDim.z);
+        naiveReLU<Acc><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+    }else{
+        tiled_mma_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+    }
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -859,7 +912,20 @@ double gemm_tensor_staged_timed(const T* h_A, const T* h_B, Acc* h_C,
 
     CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
-        tiled_mma_kernel<__half, float><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        if constexpr (Epl){
+            {
+            dim3 blockDim(256, 1, 1); 
+            dim3 gridDim((N + BLKSIZE - 1) / BLKSIZE, (M + BLKSIZE - 1) / BLKSIZE, Bsize);
+            tiled_mma_kernel<T, Acc, false, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+            }
+            dim3 blockDim(16, 16, 1);
+            dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
+                (M + blockDim.y - 1) / blockDim.y,
+                (Bsize + blockDim.z - 1) / blockDim.z);
+            naiveReLU<Acc><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+        }else{
+            tiled_mma_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
+        }
     }
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));

@@ -87,6 +87,11 @@ inline std::vector<GemmShape> default_shapes() {
         {4096, 4096, 1024, 1, true, "FFN up-projection (hidden -> 4*hidden)", nullptr},
         {4096, 1024, 4096, 1, true, "FFN down-projection (4*hidden -> hidden)", nullptr},
 
+        {1024, 1024, 2048, 1, true,  "wide-tall-small", nullptr},
+        {1024, 1024, 4096, 1, true,  "wide-tall-medium", nullptr},
+        {1024, 1024, 8192, 1, true,  "wide-tall-large", nullptr},
+        {1024, 1024, 16384, 1, true,  "wide-tall-max", nullptr},
+
         {1024,  1024,  1024, 8,  true,  "square-batch-small", nullptr},
         {1024,  1024,  1024, 16,  true,  "square-batch-medium", nullptr},
         {1024,  1024,  1024, 32,  true,  "square-batch-large", nullptr},
