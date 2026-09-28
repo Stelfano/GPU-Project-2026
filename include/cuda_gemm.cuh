@@ -6,6 +6,8 @@
 #include <mma.h>
 #include <cooperative_groups/memcpy_async.h>
 #include <cuda/pipeline>
+#include "cublas_v2.h"
+#include <algorithm>
 
 using namespace nvcuda;
 
@@ -144,6 +146,7 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K
         CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
         times[r] = (double)ms_total;
     }
+    std::sort(times, times + 30);
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
 
@@ -274,7 +277,7 @@ double gemm_tiled_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int 
         CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
         times[r] = ms_total;
     }
-
+    std::sort(times, times + 30);
     CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaEventDestroy(start));
@@ -430,6 +433,7 @@ double gemm_tiled_timed_2D(const T* h_A, const T* h_B, Acc* h_C, int M, int N, i
         CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
         times[r] = ms_total;
     }
+    std::sort(times, times + 30);
     CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaEventDestroy(start));
@@ -611,6 +615,7 @@ double gemm_warptiled_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, 
         CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
         times[r] = ms_total;
     }
+    std::sort(times, times + 30);
     CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaEventDestroy(start));
@@ -748,7 +753,7 @@ double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
         CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
         times[r] = ms_total;
     }
-
+    std::sort(times, times + 30);
     CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaEventDestroy(start));
@@ -946,6 +951,8 @@ double gemm_tensor_staged_timed(const T* h_A, const T* h_B, Acc* h_C,
         CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
         times[r] = ms_total;
     }
+
+    std::sort(times, times + 30);
     CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaEventDestroy(start));
@@ -958,4 +965,89 @@ double gemm_tensor_staged_timed(const T* h_A, const T* h_B, Acc* h_C,
 }
 
 
+template <typename T, typename Acc, bool Fusion, bool Epl>
+double cuBlasFunc(std::vector<T> &h_A, std::vector<T> &h_B, std::vector<Acc> &h_C, int M, int N, int K, int Bsize, int n_reps){
 
+    size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
+    size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
+    size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(Acc);
+
+    T* d_A;
+    T* d_B;
+    Acc* d_C;
+
+    cudaMalloc(&d_A, bytesA);
+    cudaMalloc(&d_B, bytesB);
+    cudaMalloc(&d_C, bytesC);
+
+    cublasHandle_t handle;
+    cublasStatus_t status = cublasCreate(&handle);
+
+    if(status != CUBLAS_STATUS_SUCCESS){
+        fprintf(stderr, "cuBLAS FP32 initialization error\n");
+        return EXIT_FAILURE;
+    }
+
+    cudaMemcpy(d_A, h_A.data(), bytesA, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B.data(), bytesB, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_C, h_C.data(), bytesC, cudaMemcpyHostToDevice);
+    float alpha = 1, beta = 0;
+    cublasStatus_t stat;
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    float gpu_ms = 0;
+    double times[n_reps] = {0.0f};
+
+
+    stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                        N, M, K,
+                        &alpha,
+                        d_B, CUDA_R_32F, N, M*K,
+                        d_A, CUDA_R_32F, K, N*K,
+                        &beta,
+                        d_C, CUDA_R_32F, N, M*N, Bsize,
+                        CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+            
+
+    for (int r = 0;r < n_reps ;r++){
+        cudaEventRecord(start);
+        stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                            N, M, K,
+                            &alpha,
+                            d_B, CUDA_R_32F, N, M*K,
+                            d_A, CUDA_R_32F, K, N*K,
+                            &beta,
+                            d_C, CUDA_R_32F, N, M*N, Bsize,
+                            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+
+        if constexpr(Epl || Fusion){
+            dim3 blockDim(16, 16, 1);
+            dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
+                (M + blockDim.y - 1) / blockDim.y,
+                (Bsize + blockDim.z - 1) / blockDim.z);
+            naiveReLU<float><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
+        }
+
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+                
+        cudaEventElapsedTime(&gpu_ms, start, stop);
+        times[r] = gpu_ms;
+    }
+
+    std::sort(times, times + 30);
+        
+    cudaMemcpy(h_C.data(), d_C, M * N * Bsize *sizeof(Acc), cudaMemcpyDeviceToHost);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+    cublasDestroy(handle);
+
+    return times[n_reps/2];
+}
