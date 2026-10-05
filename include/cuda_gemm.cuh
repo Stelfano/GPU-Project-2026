@@ -85,14 +85,13 @@ __global__ void naiveReLU(Acc *C, int M, int N, int Bsize){
 
 template <typename T, typename Acc, bool Fusion, bool Epl>
 double gemm_cuda_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K, int Bsize, int n_reps) {
-
+    
     size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
     size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
     size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(Acc);
 
     T *d_A = nullptr, *d_B = nullptr;
     Acc *d_C = nullptr;
-    double times[n_reps] = {0.0f};
     CUDA_CHECK(cudaMalloc(&d_A, bytesA));
     CUDA_CHECK(cudaMalloc(&d_B, bytesB));
     CUDA_CHECK(cudaMalloc(&d_C, bytesC));
@@ -120,9 +119,9 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
 
-    for (int r = 0; r < n_reps; ++r) {
     CUDA_CHECK(cudaEventRecord(start));
-
+    
+    for (int r = 0; r < n_reps; ++r) {
         if constexpr (Epl){
             if constexpr (Fusion){
                 dim3 gridDimSplitK((N + blockDim.x - 1) / blockDim.x,
@@ -142,13 +141,9 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K
         CUDA_CHECK(cudaEventRecord(stop));
         CUDA_CHECK(cudaEventSynchronize(stop));
 
-        float ms_total = 0;
-        CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
-        times[r] = (double)ms_total;
-    }
-    std::sort(times, times + 30);
-    CUDA_CHECK(cudaEventRecord(stop));
-    CUDA_CHECK(cudaEventSynchronize(stop));
+    float ms_total = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
+    double ms_avg = static_cast<double>(ms_total) / n_reps;
 
     CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
 
@@ -158,7 +153,7 @@ double gemm_cuda_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int K
     CUDA_CHECK(cudaFree(d_B));
     CUDA_CHECK(cudaFree(d_C));
 
-    return times[n_reps/2];
+    return ms_avg;
 
 }
 
@@ -230,7 +225,6 @@ double gemm_tiled_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int 
 
     T *d_A = nullptr, *d_B = nullptr;
     Acc *d_C = nullptr;
-    double times[n_reps] = {0.0f};
     CUDA_CHECK(cudaMalloc(&d_A, bytesA));
     CUDA_CHECK(cudaMalloc(&d_B, bytesB));
     CUDA_CHECK(cudaMalloc(&d_C, bytesC));
@@ -257,8 +251,8 @@ double gemm_tiled_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int 
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
 
-    for (int r = 0; r < n_reps; ++r) {
     CUDA_CHECK(cudaEventRecord(start));
+    for (int r = 0; r < n_reps; ++r) {
         if constexpr(Epl){
             gemm_tiled_kernel<T, Acc, false, false, BM, BN, BK, TM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
             dim3 blockDim(16, 16, 1);
@@ -269,15 +263,14 @@ double gemm_tiled_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int 
         }else{
             gemm_tiled_kernel<T, Acc, Fusion, false, BM, BN, BK, TM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
         }
-
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-
-        float ms_total = 0.0f;
-        CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
-        times[r] = ms_total;
     }
-    std::sort(times, times + 30);
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms_total = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
+    double ms_avg = static_cast<double>(ms_total) / n_reps;
+
     CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaEventDestroy(start));
@@ -286,7 +279,7 @@ double gemm_tiled_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, int 
     CUDA_CHECK(cudaFree(d_B));
     CUDA_CHECK(cudaFree(d_C));
 
-    return times[n_reps/2];
+    return ms_avg;
 }
 
 
@@ -381,7 +374,6 @@ double gemm_tiled_timed_2D(const T* h_A, const T* h_B, Acc* h_C, int M, int N, i
 
     T *d_A = nullptr, *d_B = nullptr;
     Acc *d_C = nullptr;
-    float times[n_reps] = {0.0f};
     CUDA_CHECK(cudaMalloc(&d_A, bytesA));
     CUDA_CHECK(cudaMalloc(&d_B, bytesB));
     CUDA_CHECK(cudaMalloc(&d_C, bytesC));
@@ -408,9 +400,8 @@ double gemm_tiled_timed_2D(const T* h_A, const T* h_B, Acc* h_C, int M, int N, i
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
 
-    for (int r = 0; r < n_reps; ++r) {
     CUDA_CHECK(cudaEventRecord(start));
-
+    for (int r = 0; r < n_reps; ++r) {
         if constexpr(Epl){
             {
             dim3 blockDim((BM / TM) * (BN / TN));          
@@ -425,15 +416,14 @@ double gemm_tiled_timed_2D(const T* h_A, const T* h_B, Acc* h_C, int M, int N, i
         }else{
             gemm_tiled_kernel_2D<T, Acc, Fusion, false, BM, BN, BK, TM, TN><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
         }
-
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-
-        float ms_total = 0.0f;
-        CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
-        times[r] = ms_total;
     }
-    std::sort(times, times + 30);
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms_total = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
+    double ms_avg = static_cast<double>(ms_total) / n_reps;
+
     CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaEventDestroy(start));
@@ -442,7 +432,7 @@ double gemm_tiled_timed_2D(const T* h_A, const T* h_B, Acc* h_C, int M, int N, i
     CUDA_CHECK(cudaFree(d_B));
     CUDA_CHECK(cudaFree(d_C));
 
-    return times[n_reps/2];
+    return ms_avg;
 }
 
 template <typename T, typename Acc, bool Fusion, bool Epl, int BM, int BN, int BK, int TM, int TN, int WN, int WM>
@@ -562,7 +552,6 @@ double gemm_warptiled_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, 
 
     T *d_A = nullptr, *d_B = nullptr;
     Acc *d_C = nullptr;
-    double times[n_reps] = {0.0f};
     CUDA_CHECK(cudaMalloc(&d_A, bytesA));
     CUDA_CHECK(cudaMalloc(&d_B, bytesB));
     CUDA_CHECK(cudaMalloc(&d_C, bytesC));
@@ -592,8 +581,8 @@ double gemm_warptiled_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, 
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
 
+    CUDA_CHECK(cudaEventRecord(start));
     for (int r = 0; r < n_reps; ++r) {
-        CUDA_CHECK(cudaEventRecord(start));
         if constexpr (Epl){
             {
             dim3 blockDim(NUM_THREADS); 
@@ -608,14 +597,14 @@ double gemm_warptiled_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, 
         }else{
             gemm_warptiled_kernel<T, Acc, Fusion, false, BM, BN, BK, TM, TN, WN, WM><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
         }
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-
-        float ms_total = 0.0f;
-        CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
-        times[r] = ms_total;
     }
-    std::sort(times, times + 30);
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms_total = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
+    double ms_avg = static_cast<double>(ms_total) / n_reps;
+
     CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaEventDestroy(start));
@@ -624,7 +613,7 @@ double gemm_warptiled_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int N, 
     CUDA_CHECK(cudaFree(d_B));
     CUDA_CHECK(cudaFree(d_C));
 
-    return times[n_reps/2];
+    return ms_avg;
 }
 
 
@@ -694,7 +683,6 @@ double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
 
     T *d_A = nullptr, *d_B = nullptr;
     Acc *d_C = nullptr;
-    double times[n_reps] = {0.0f};
     CUDA_CHECK(cudaMalloc(&d_A, bytesA));
     CUDA_CHECK(cudaMalloc(&d_B, bytesB));
     CUDA_CHECK(cudaMalloc(&d_C, bytesC));
@@ -726,9 +714,8 @@ double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
 
-    for (int r = 0; r < n_reps; ++r) {
     CUDA_CHECK(cudaEventRecord(start));
-
+    for (int r = 0; r < n_reps; ++r) {
         if constexpr (Epl){
             {
             dim3 blockDim(128, 4);
@@ -746,14 +733,14 @@ double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
         }else{
         batched_mma_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
         }
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-
-        float ms_total = 0.0f;
-        CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
-        times[r] = ms_total;
     }
-    std::sort(times, times + 30);
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float ms_total = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
+    double ms_avg = static_cast<double>(ms_total) / n_reps;
+
     CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaEventDestroy(start));
@@ -762,7 +749,7 @@ double gemm_tensor_timed(const T* h_A, const T* h_B, Acc* h_C,
     CUDA_CHECK(cudaFree(d_B));
     CUDA_CHECK(cudaFree(d_C));
 
-    return times[n_reps/2];
+    return ms_avg;
 }
 
 
@@ -894,7 +881,6 @@ double gemm_tensor_staged_timed(const T* h_A, const T* h_B, Acc* h_C,
     int BLKSIZE =  128;
     T *d_A = nullptr, *d_B = nullptr;
     Acc *d_C = nullptr;
-    double times[n_reps] = {0.0f};
     CUDA_CHECK(cudaMalloc(&d_A, bytesA));
     CUDA_CHECK(cudaMalloc(&d_B, bytesB));
     CUDA_CHECK(cudaMalloc(&d_C, bytesC));
@@ -926,9 +912,8 @@ double gemm_tensor_staged_timed(const T* h_A, const T* h_B, Acc* h_C,
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
 
-    for (int r = 0; r < n_reps; ++r) {
     CUDA_CHECK(cudaEventRecord(start));
-
+    for (int r = 0; r < n_reps; ++r) {
         if constexpr (Epl){
             {
             dim3 blockDim(256, 1, 1); 
@@ -943,16 +928,14 @@ double gemm_tensor_staged_timed(const T* h_A, const T* h_B, Acc* h_C,
         }else{
             tiled_mma_kernel<T, Acc, Fusion, false><<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, Bsize);
         }
-
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-
-        float ms_total = 0.0f;
-        CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
-        times[r] = ms_total;
     }
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
 
-    std::sort(times, times + 30);
+    float ms_total = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms_total, start, stop));
+    double ms_avg = static_cast<double>(ms_total) / n_reps;
+
     CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaEventDestroy(start));
@@ -965,89 +948,4 @@ double gemm_tensor_staged_timed(const T* h_A, const T* h_B, Acc* h_C,
 }
 
 
-template <typename T, typename Acc, bool Fusion, bool Epl>
-double cuBlasFunc(std::vector<T> &h_A, std::vector<T> &h_B, std::vector<Acc> &h_C, int M, int N, int K, int Bsize, int n_reps){
 
-    size_t bytesA = static_cast<size_t>(M) * K * Bsize * sizeof(T);
-    size_t bytesB = static_cast<size_t>(K) * N * Bsize * sizeof(T);
-    size_t bytesC = static_cast<size_t>(M) * N * Bsize * sizeof(Acc);
-
-    T* d_A;
-    T* d_B;
-    Acc* d_C;
-
-    cudaMalloc(&d_A, bytesA);
-    cudaMalloc(&d_B, bytesB);
-    cudaMalloc(&d_C, bytesC);
-
-    cublasHandle_t handle;
-    cublasStatus_t status = cublasCreate(&handle);
-
-    if(status != CUBLAS_STATUS_SUCCESS){
-        fprintf(stderr, "cuBLAS FP32 initialization error\n");
-        return EXIT_FAILURE;
-    }
-
-    cudaMemcpy(d_A, h_A.data(), bytesA, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, h_B.data(), bytesB, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_C, h_C.data(), bytesC, cudaMemcpyHostToDevice);
-    float alpha = 1, beta = 0;
-    cublasStatus_t stat;
-
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-
-    float gpu_ms = 0;
-    double times[n_reps] = {0.0f};
-
-
-    stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                        N, M, K,
-                        &alpha,
-                        d_B, CUDA_R_32F, N, M*K,
-                        d_A, CUDA_R_32F, K, N*K,
-                        &beta,
-                        d_C, CUDA_R_32F, N, M*N, Bsize,
-                        CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-            
-
-    for (int r = 0;r < n_reps ;r++){
-        cudaEventRecord(start);
-        stat = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                            N, M, K,
-                            &alpha,
-                            d_B, CUDA_R_32F, N, M*K,
-                            d_A, CUDA_R_32F, K, N*K,
-                            &beta,
-                            d_C, CUDA_R_32F, N, M*N, Bsize,
-                            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-
-        if constexpr(Epl || Fusion){
-            dim3 blockDim(16, 16, 1);
-            dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
-                (M + blockDim.y - 1) / blockDim.y,
-                (Bsize + blockDim.z - 1) / blockDim.z);
-            naiveReLU<float><<<gridDim, blockDim>>>(d_C, M, N, Bsize);
-        }
-
-        cudaEventRecord(stop);
-        cudaEventSynchronize(stop);
-                
-        cudaEventElapsedTime(&gpu_ms, start, stop);
-        times[r] = gpu_ms;
-    }
-
-    std::sort(times, times + 30);
-        
-    cudaMemcpy(h_C.data(), d_C, M * N * Bsize *sizeof(Acc), cudaMemcpyDeviceToHost);
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
-
-    cudaFree(d_A);
-    cudaFree(d_B);
-    cudaFree(d_C);
-    cublasDestroy(handle);
-
-    return times[n_reps/2];
-}
