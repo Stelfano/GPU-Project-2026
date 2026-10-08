@@ -115,6 +115,12 @@ inline std::vector<GemmShape> large_shapes(){
     };
 }
 
+inline std::vector<GemmShape> small_shape(){
+    return{
+        {4096, 4096, 4096, 1, true, "square-small", nullptr},
+    };
+}
+
 inline double gflops(long long M, long long N, long long K, long long Bsize, double ms) {
     double flop = 2.0 * static_cast<double>(M) * static_cast<double>(N) * static_cast<double>(K) * static_cast<double>(Bsize);
     return flop / (ms / 1000.0) / 1e9;

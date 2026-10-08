@@ -1,7 +1,7 @@
 CC=nvcc
 
 ARCH=sm_80
-LIB_FLAGS=-lm -O3 -MD -arch=$(ARCH) -lcublas -std=c++17
+LIB_FLAGS=-lm -O3 -MD -arch=$(ARCH) -lcublas -std=c++17 -lineinfo
 
 BIN_FOLDER := bin
 OBJ_FOLDER := obj

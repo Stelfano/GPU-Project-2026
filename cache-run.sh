@@ -11,4 +11,4 @@
 
 module load CUDA
 
-ncu --metrics l1tex__t_sector_hit_rate.pct,lts__t_sector_hit_rate.pct ./bin/main
+ncu --set full ./bin/main
