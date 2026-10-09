@@ -929,3 +929,6 @@ double gemm_tensor_staged_timed(const T* h_A, const T* h_B, Acc* h_C, int M, int
 
     return times[n_reps/2];
 }
+
+double gemm_tensor_tf32(const float* h_A, const float* h_B, float* h_C, int M, int N, int K, int Bsize, int n_reps, bool Fusion, bool Epl);
+
