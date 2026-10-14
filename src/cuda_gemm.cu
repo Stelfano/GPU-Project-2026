@@ -107,7 +107,6 @@ __global__ void tiled_mma_kernel_tf32(float *A, float *B, float *C, int M, int N
                 }
             }
 
-
             if (global_r < M && global_c < N) {
                 wmma::store_matrix_sync(
                     &C_batch[global_r * N + global_c],

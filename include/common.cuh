@@ -105,7 +105,8 @@ inline std::vector<GemmShape> reduced_shapes(){
         {256,  256,  256, 1,  true,  "square-small", nullptr},
         {4096, 1024, 1024, 1, true,  "tall-skinny-medium", nullptr},
         {1024, 256, 1024, 1,  true, "FFN down-projection (4*hidden -> hidden)", nullptr},
-        {1024,  1024,  1024, 16,  true,  "square-batch-medium", nullptr}
+        {1024,  1024,  1024, 16,  true,  "square-batch-medium", nullptr},
+        {4096,  4096,  1024, 32,  true,  "square-batch-large", nullptr}
     };
 }
 

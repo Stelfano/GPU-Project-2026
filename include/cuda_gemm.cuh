@@ -180,7 +180,10 @@ __global__ void gemm_tiled_kernel(const T* __restrict__ A, const T* __restrict__
     #pragma unroll
     for (int i = 0; i < TM; ++i) acc[i] = static_cast<T>(0.0f);
 
+    //"Swipe to the right" for loop
     for (int k0 = 0; k0 < K; k0 += BK) {
+        //Load of block performed by every thread in the grid, 64x8 matrices in this configuration
+        //A has probably uncoalesced accesses
         As[inner_row_a * BK + inner_col_a] = A_tile[static_cast<size_t>(inner_row_a) * K + inner_col_a];
         Bs[inner_row_b * BN + inner_col_b] = B_tile[static_cast<size_t>(inner_row_b) * N + inner_col_b];
         __syncthreads();
@@ -188,9 +191,11 @@ __global__ void gemm_tiled_kernel(const T* __restrict__ A, const T* __restrict__
         A_tile += BK;
         B_tile += static_cast<size_t>(BK) * N;
 
+        //B is kept fixed while A moves laterally to accumulate block (every thread accumulates 8 elements before moving)
         #pragma unroll
         for (int k = 0; k < BK; ++k) {
             T b_val = Bs[k * BN + thread_col];   
+            //This for is a rightward movement of the A matrix (thread_row * TM + i identifies the row and iterates along it, k moves along the column)
             #pragma unroll
             for (int i = 0; i < TM; ++i) {
                 T a_val = As[(thread_row * TM + i) * BK + k];
@@ -200,6 +205,7 @@ __global__ void gemm_tiled_kernel(const T* __restrict__ A, const T* __restrict__
         __syncthreads();
     }
 
+    //Final reduction among all blocks spanning the K dimension
     #pragma unroll
     for (int i = 0; i < TM; ++i) {
     if (Fusion)
@@ -284,16 +290,17 @@ __global__ void gemm_tiled_kernel_2D(const T* __restrict__ A, const T* __restric
     __shared__ T As[BM * BK];
     __shared__ T Bs[BK * BN];
 
+    //Same division as before except the new inner block dimension is accounted
     const int thread_col = threadIdx.x % (BN / TN);
     const int thread_row = threadIdx.x / (BN / TN);
 
     const T* A_batch = A + static_cast<size_t>(batch) * M * K;
     const T* B_batch = B + static_cast<size_t>(batch) * K * N;
-    Acc*       C_batch = C + static_cast<size_t>(batch) * M * N;
+    Acc*     C_batch = C + static_cast<size_t>(batch) * M * N;
 
     const T* A_tile = A_batch + static_cast<size_t>(block_row) * K;
     const T* B_tile = B_batch + block_col;
-    Acc*       C_tile = C_batch + static_cast<size_t>(block_row) * N + block_col;
+    Acc*     C_tile = C_batch + static_cast<size_t>(block_row) * N + block_col;
     int numThreads = (BM/TM) * (BN/TN);
 
     const int strideA = numThreads / BK;
@@ -309,11 +316,14 @@ __global__ void gemm_tiled_kernel_2D(const T* __restrict__ A, const T* __restric
     Acc thread_results[TM * TN] = {0.0};
 
 
+    //"Move to the right(for A) and down(for B)" for loop
     for (int k0 = 0; k0 < K; k0 += BK) {
+        //Load vertically the elements of A (for loop strides the rows of A)
         for (uint loadOffset = 0; loadOffset < BM; loadOffset += strideA) {
             As[(innerRowA + loadOffset) * BK + innerColA] =
                 A_tile[(innerRowA + loadOffset) * K + innerColA];
         }
+        //Load vertically the elements of B (for loop also strides the rows of B, possible missed coalescing in A???)
         for (uint loadOffset = 0; loadOffset < BK; loadOffset += strideB) {
             Bs[(innerRowB + loadOffset) * BN + innerColB] =
                 B_tile[(innerRowB + loadOffset) * N + innerColB];
@@ -328,13 +338,16 @@ __global__ void gemm_tiled_kernel_2D(const T* __restrict__ A, const T* __restric
             T a_val[TM] = {0.0};
             T b_val[TN] = {0.0};
             #pragma unroll
+            //Same as the 1D version of movement (right)
             for (int i = 0; i < TM; ++i) {
                 a_val[i] = As[(thread_row * TM + i) * BK + k];
             }
+            //Same as the 1D but for the B matrix (right)
             for(int i = 0;i < TN; ++i){
                 b_val[i] = Bs[k * BN + thread_col * TN + i];
             }
 
+            //Entire reduction of sub-block assigned to the thread
             for(int i = 0;i < TM;i++){
                 for(int j = 0;j < TN; j++){
                     thread_results[i * TN + j] += (Acc)a_val[i] * (Acc)b_val[j];
@@ -426,6 +439,7 @@ double gemm_tiled_timed_2D(const T* h_A, const T* h_B, Acc* h_C, int M, int N, i
     return times[n_reps/2];
 }
 
+//Division in block, warps, threads
 template <typename T, typename Acc, int BM, int BN, int BK, int TM, int TN, int WN, int WM>
 __global__ void gemm_warptiled_kernel(const T* __restrict__ A, const T* __restrict__ B, Acc* __restrict__ C, int M, int N, int K, int Bsize, bool Fusion) {
     const int block_row = blockIdx.y * BM;
@@ -433,11 +447,13 @@ __global__ void gemm_warptiled_kernel(const T* __restrict__ A, const T* __restri
     const int batch     = blockIdx.z;
     const int WNITER    = 2;
 
+    //Defining the space for every warp, same as before but on new sizes, dividing the block in warp chunks
     constexpr int WARPSIZE = 32;
     const int warpIdx = threadIdx.x / WARPSIZE;
     const int warpCol = warpIdx % (BN / WN);
     const int warpRow = warpIdx / (BN / WN);
 
+    //Number of M iteration depends on warp chunk size and thread chunk size
     constexpr int WMITER = WN * WM / (TN * TM * WARPSIZE * WNITER);
     constexpr int WSUBM = WM / WMITER;
     constexpr int WSUBN = WN / WNITER;
@@ -447,19 +463,19 @@ __global__ void gemm_warptiled_kernel(const T* __restrict__ A, const T* __restri
     const int threadColWarp = threadIdxWarp % (WSUBN / TN);
     const int threadRowWarp = threadIdxWarp / (WSUBN / TN);
 
-
     __shared__ T As[BM * BK];
     __shared__ T Bs[BK * BN];
 
     const T* A_batch = A + static_cast<size_t>(batch) * M * K;
     const T* B_batch = B + static_cast<size_t>(batch) * K * N;
-    Acc*       C_batch = C + static_cast<size_t>(batch) * M * N;
+    Acc*     C_batch = C + static_cast<size_t>(batch) * M * N;
 
     const T* A_tile = A_batch + static_cast<size_t>(block_row) * K;
     const T* B_tile = B_batch + block_col;
     Acc*       C_tile = C_batch + static_cast<size_t>(block_row) * N + block_col;
     int numThreads = (BM/WM)*(BN/WN)*WARPSIZE;
 
+    //Loading is the same ad 2D
     const int strideA = numThreads / BK;
     const int innerRowA = threadIdx.x / BK;
     const int innerColA = threadIdx.x % BK;
@@ -473,6 +489,7 @@ __global__ void gemm_warptiled_kernel(const T* __restrict__ A, const T* __restri
     T thread_results[WMITER * TM * TN * WNITER] = {0.0};
 
     for (int k0 = 0; k0 < K; k0 += BK) {
+        //Same loading structure as last kernel 
         for (uint loadOffset = 0; loadOffset < BM; loadOffset += strideA) {
             As[(innerRowA + loadOffset) * BK + innerColA] =
                 A_tile[(innerRowA + loadOffset) * K + innerColA];
@@ -486,19 +503,23 @@ __global__ void gemm_warptiled_kernel(const T* __restrict__ A, const T* __restri
         A_tile += BK;
         B_tile += static_cast<size_t>(BK) * N;
 
+        //Again iterating over K (right and down)
         #pragma unroll
         for (int k = 0; k < BK; ++k) {
             #pragma unroll
+            //WMITER works at warp level, TM works at thread level
             for (int i = 0; i < WMITER; ++i) {
                 for(int j = 0; j < TM; ++j)
                     a_val[i * TM + j] = As[(warpRow * WM + i * WSUBM + threadRowWarp * TM + j) * BK + k];
             }
 
+            //WNITER works at warp level, TN works at thread level
             for (int i = 0; i < WNITER; ++i) {
                 for(int j = 0; j < TN; ++j)
                     b_val[i * TN + j] = Bs[k * BN + (warpCol * WN + i * WSUBN + threadColWarp * TN + j)];
             }
 
+            //Thread reduction schema, (subRow * TM + i identifies the row, multiplied for WNITER * TN as leading dimension), (subCol * TN + j identifies a column)
             for(int subRow = 0;subRow < WMITER; ++subRow){
                 for(int subCol = 0;subCol < WNITER; ++subCol){
                     for(int i = 0; i < TM; ++i){
@@ -513,6 +534,7 @@ __global__ void gemm_warptiled_kernel(const T* __restrict__ A, const T* __restri
         __syncthreads();
     }
 
+    //SubRow and SubCol is the division of the chunk for the warp to reduce, TM and TN are the elements every thread in the warp reduces
     for(int subRow = 0;subRow < WMITER; ++subRow){
         for(int subCol = 0;subCol < WNITER; ++subCol){
             for(int i = 0; i < TM; ++i){
